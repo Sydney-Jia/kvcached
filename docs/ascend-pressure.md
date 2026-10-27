@@ -65,6 +65,12 @@ offered requests**. Queue acceptance is not successful service capacity.
 Report timeouts and invalid runs; latency percentiles over completed requests
 alone must not conceal failures.
 
+The worker sends bounded progress snapshots to the parent during generation.
+If the engine fails or exceeds its deadline, keep completed and pending requests
+under `partial_requests` with the original offered-load denominator. These
+observations explain the failure; they do not turn an invalid or interrupted
+run into a successful performance comparison.
+
 Save full output tokens, actual cached-token counts, driver memory, control
 state, and A's returning-request latency. Compare matching native execution
 histories. Batch/prefix changes can affect floating-point paths, so any token
@@ -101,6 +107,7 @@ Run the CPU-only protocol checks with:
 ```bash
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 ENABLE_KVCACHED=false \
 python -m pytest tests/test_ascend_pressure_protocol.py \
+  tests/test_ascend_pressure_stream.py \
   tests/test_ascend_process_identity.py -q
 ```
 

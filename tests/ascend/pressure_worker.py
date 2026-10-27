@@ -3,10 +3,10 @@
 
 """One private engine for the three-arm experiment; no network service."""
 import os
-import time
 import traceback
 
 from pressure_protocol import MIB
+from pressure_stream import measure_requests
 
 
 def run_worker(connection, name, model, arm, index, log):
@@ -42,35 +42,12 @@ def run_worker(connection, name, model, arm, index, log):
                         "control": get_instance_memory_limit(name)}
             return {"memory": {"driver": engine.collective_rpc("driver_memory_snapshot")[0]}}
 
-        def generate(prompts, output_tokens, offered_at=None):
-            core = engine.llm_engine
+        def generate(prompts, output_tokens, offered_at=None, phase="generation"):
             params = SamplingParams(temperature=0, max_tokens=output_tokens, ignore_eos=True)
-            started = time.monotonic() if offered_at is None else offered_at
-            records = {}
-            for i, prompt in enumerate(prompts):
-                request_id = f"{time.monotonic_ns()}-{i}"
-                records[request_id] = {"index": i, "first": None, "finished": False,
-                                       "token_ids": [], "cached_tokens": None}
-                core.add_request(request_id, {"prompt_token_ids": prompt}, params)
-            while core.has_unfinished_requests():
-                outputs = core.step()
-                arrived = time.monotonic()
-                for output in outputs:
-                    record = records[output.request_id]
-                    tokens = list(output.outputs[0].token_ids)
-                    if tokens and record["first"] is None:
-                        record["first"] = arrived
-                    record["token_ids"] = tokens
-                    record["cached_tokens"] = output.num_cached_tokens
-                    if output.finished:
-                        count = len(tokens)
-                        first = record["first"]
-                        if first is None:
-                            raise RuntimeError("Finished request has no output token")
-                        record.update(finished=True, ttft_seconds=first - started,
-                                      latency_seconds=arrived - started,
-                                      tpot_seconds=(arrived - first) / max(1, count - 1))
-            return sorted(records.values(), key=lambda r: r["index"])
+            return measure_requests(
+                engine.llm_engine, prompts, params, offered_at,
+                progress=lambda records: connection.send(
+                    {"progress": {"phase": phase, "requests": records}}))
 
         connection.send({"ready": name, "pid": os.getpid(), **snapshot()})
         while True:

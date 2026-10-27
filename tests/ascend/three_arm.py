@@ -48,6 +48,7 @@ def main():
               "status": "running", "model": str(args.model),
               "comparison": "static 448+448 MiB versus two elastic 896 MiB logical ceilings; pressure uses common fixed ballast; ample is an unconstrained negative control"}
     workers, connections = [], []
+    latest_progress = {}
     context = multiprocessing.get_context("spawn")
 
     def save():
@@ -61,14 +62,21 @@ def main():
 
     def receive(index, timeout=900):
         deadline = time.monotonic() + timeout
-        while not connections[index].poll(0.2):
+        while True:
             guard()
-            if not workers[index].is_alive() or time.monotonic() >= deadline:
-                raise RuntimeError(f"Engine {index} exited or exceeded its phase deadline")
-        response = connections[index].recv()
-        if "error" in response:
-            raise RuntimeError(response["error"])
-        return response.get("result", response)
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"Engine {index} exceeded its phase deadline")
+            if not connections[index].poll(0.2):
+                if not workers[index].is_alive():
+                    raise RuntimeError(f"Engine {index} exited")
+                continue
+            response = connections[index].recv()
+            if "progress" in response:
+                latest_progress[index] = response["progress"]
+                continue
+            if "error" in response:
+                raise RuntimeError(response["error"])
+            return response.get("result", response)
 
     def call(index, command, value=None, timeout=900):
         guard()
@@ -122,7 +130,8 @@ def main():
             offered_at = time.monotonic()
             connections[1].send(("generate", {"prompts": trace["burst_prompts"],
                                                "output_tokens": trace["output_tokens"],
-                                               "offered_at": offered_at}))
+                                               "offered_at": offered_at,
+                                               "phase": f"burst-{iteration}"}))
             if args.arm == "reclaim":
                 minimum = before[0]["memory"]["pool_control"]["minimum_bytes"]
                 round_result["control"] = call(0, "limit", minimum)
@@ -137,6 +146,15 @@ def main():
     except BaseException as error:
         result["status"] = "failed_or_invalid"
         result["error"] = repr(error)
+        result["last_generation_progress"] = latest_progress
+        if result["rounds"]:
+            current = result["rounds"][-1]
+            partial = latest_progress.get(1, {})
+            if ("requests" not in current
+                    and partial.get("phase") == f"burst-{current['iteration']}"):
+                current["partial_requests"] = partial["requests"]
+                current["partial_summary"] = summarize(partial["requests"], 12, trace["slo"])
+                current["partial_result_warning"] = "Incomplete/invalid run; not a valid performance comparison"
         raise
     finally:
         # Release pressure before process teardown, including when the host
