@@ -45,7 +45,7 @@ def main():
 
     # Warm the fill/copy paths before measuring. Empty the PyTorch allocator
     # so a later independent recipient must acquire backing from the driver.
-    warm = torch.empty(amount // 2, dtype=torch.float16, device="npu:0")
+    warm = torch.empty(amount // 2, dtype=torch.bfloat16, device="npu:0")
     warm.fill_(3)
     assert warm[:16].cpu().tolist() == [3] * 16
     del warm
@@ -54,7 +54,9 @@ def main():
     vmm.init_kvcached("npu:0", page, False,
                      instance_name=f"ascend-physical-audit-{os.getpid()}")
     try:
-        tensor = vmm.create_kv_tensors(2 * amount, 2, "npu:0", 1, 1, page_size=page)[0]
+        tensor = vmm.create_kv_tensors(2 * amount, torch.bfloat16, "npu:0", 1, 1,
+                                      page_size=page)[0]
+        assert tensor.dtype == torch.bfloat16 and tensor.element_size() == 2
         address = tensor.data_ptr()
         assert vmm.map_to_kv_tensors([0])
         tensor[:32].fill_(17)
@@ -81,7 +83,7 @@ def main():
             assert tensor[:32].cpu().tolist() == [17] * 32
             # An independent allocator can consume the returned capacity. This
             # is not a claim about reusing the exact physical page handles.
-            recipient = torch.empty(amount // 2, dtype=torch.float16, device="npu:0")
+            recipient = torch.empty(amount // 2, dtype=torch.bfloat16, device="npu:0")
             recipient.fill_(31)
             assert recipient[:32].cpu().tolist() == [31] * 32
             received = record(f"{iteration}-independent-torch-recipient")
