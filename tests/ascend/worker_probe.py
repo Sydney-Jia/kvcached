@@ -5,6 +5,11 @@
 
 
 class PhysicalBudgetProbe:
+    def audit_trace_fia(self, path):
+        from fia_trace import install
+
+        return install(path)
+
     def audit_allocate_ballast(self, amount):
         """Test-only physical allocation, never an artificial kvcached quota."""
         import ctypes

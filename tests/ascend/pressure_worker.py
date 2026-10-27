@@ -48,6 +48,8 @@ def run_worker(connection, name, model, arm, index, log):
             gpu_memory_utilization=0.10, enable_prefix_caching=(index == 0),
             enable_chunked_prefill=True, seed=42,
             worker_extension_cls="worker_probe.PhysicalBudgetProbe")
+        if index == 1 and os.getenv("KVCACHED_AUDIT_TRACE_FIA") == "1":
+            engine.collective_rpc("audit_trace_fia", args=(log + ".fia.json",))
 
         def snapshot():
             if elastic:
