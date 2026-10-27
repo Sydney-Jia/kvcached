@@ -25,9 +25,22 @@ def run_worker(connection, name, model, arm, index, log):
         if elastic:
             import kvcached.integration.vllm.autopatch  # noqa: F401
         from vllm import LLM, SamplingParams
+        from vllm.platforms import current_platform
+        from vllm.plugins import load_plugins_by_group
 
         from kvcached.control import get_instance_memory_limit, set_instance_memory_limit
 
+        runtime_identity = {
+            "platform": type(current_platform).__module__ + "." + type(current_platform).__name__,
+            "plugins": {group: {name: function.__module__ + ":" + function.__name__
+                                for name, function in load_plugins_by_group(group).items()}
+                        for group in ("vllm.platform_plugins", "vllm.general_plugins")},
+        }
+        if (runtime_identity["platform"] != "vllm_ascend.platform.NPUPlatform"
+                or any(not value.startswith("vllm_ascend:")
+                       for group in runtime_identity["plugins"].values()
+                       for value in group.values())):
+            raise RuntimeError(f"Uncontrolled platform/plugin selection: {runtime_identity}")
         engine = LLM(
             model=model, dtype="bfloat16", enforce_eager=True, max_model_len=1024,
             max_num_seqs=12, max_num_batched_tokens=2048,
@@ -49,7 +62,8 @@ def run_worker(connection, name, model, arm, index, log):
                 progress=lambda records: connection.send(
                     {"progress": {"phase": phase, "requests": records}}))
 
-        connection.send({"ready": name, "pid": os.getpid(), **snapshot()})
+        connection.send({"ready": name, "pid": os.getpid(),
+                         "runtime_identity": runtime_identity, **snapshot()})
         while True:
             command, value = connection.recv()
             if command == "stop":

@@ -84,6 +84,14 @@ The entrypoint is `tests/ascend/three_arm.py`; its helpers are in the same
 directory. Add that directory and the fixed release to `PYTHONPATH`. Use the
 same runtime, trace, checkpoint, and experiment commit in every arm.
 
+Pin the native `ascend` platform and its required general plugins, and record
+their resolved function modules for both engines. This environment can also
+contain `ascend_vllm` and duplicate plugin names; a matching package version
+alone does not establish identical execution paths. The worker rejects a
+non-native platform or unexpected plugin selection before constructing an
+engine. Keep the same explicit plugin allowlist and Python hash seed across
+all arms; do not mix earlier uncontrolled runs into this comparison.
+
 The host supervisor must check health and actual processes immediately before
 launch, monitor foreign process entry, write the abort file, and clean up only
 processes identified by this experiment's unique token or exact, run-unique
