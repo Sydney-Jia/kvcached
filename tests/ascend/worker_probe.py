@@ -11,8 +11,8 @@ class PhysicalBudgetProbe:
 
         import torch
 
-        if os.getenv("KVCACHED_EXCLUSIVE_PRESSURE_AUDIT") != "1":
-            raise RuntimeError("Physical-pressure allocation requires an exclusive test window")
+        if os.getenv("KVCACHED_PRESSURE_AUDIT_AUTHORIZED") != "1":
+            raise RuntimeError("Physical-pressure allocation requires explicit authorization")
         if getattr(self, "_audit_ballast", None) is not None:
             raise RuntimeError("Ballast already allocated")
         if amount <= 0 or amount % (2 * 1024 * 1024):

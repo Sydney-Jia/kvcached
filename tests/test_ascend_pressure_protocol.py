@@ -40,3 +40,29 @@ def test_pressure_rejects_missing_or_wrong_reservation(tmp_path, change):
 def test_trace_fingerprint_changes_with_workload():
     assert protocol.trace_hash({"prompts": [1], "output_tokens": 64}) != protocol.trace_hash(
         {"prompts": [1], "output_tokens": 128})
+
+
+@pytest.mark.parametrize("change,accepted", [
+    ({}, True),
+    ({"pressure_authorized": False}, False),
+    ({"authorization_reference": ""}, False),
+    ({"authorization_kind": "idle_snapshot"}, False),
+    ({"exclusive": True}, False),
+    ({"external_reservation": True}, False),
+    ({"foreign_process_policy": "ignore"}, False),
+    ({"device": 2}, False),
+    ({"expires_at": 1119}, False),
+])
+def test_explicit_idle_device_authorization_is_not_a_reservation(tmp_path, change, accepted):
+    record = {"node": "test-node", "device": 1, "exclusive": False,
+              "external_reservation": False, "authorization_kind": "user_directed_idle_device",
+              "pressure_authorized": True, "authorization_reference": "unit-test-only",
+              "foreign_process_policy": "abort_own_run", "starts_at": 900, "expires_at": 1500}
+    record.update(change)
+    path = tmp_path / "authorization.json"
+    path.write_text(json.dumps(record))
+    if accepted:
+        assert protocol.check_lease(path, "test-node", 1, now=1000) == record
+    else:
+        with pytest.raises(RuntimeError):
+            protocol.check_lease(path, "test-node", 1, now=1000)

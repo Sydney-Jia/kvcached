@@ -5,7 +5,7 @@
 
 Run native/held/reclaim with the same trace and fixed physical ballast. A logical
 budget alone is never labelled physical pressure. Pressure requires a separate
-exclusive reservation record and a host supervisor watching foreign NPU jobs.
+explicit authorization record and a host supervisor watching foreign NPU jobs.
 """
 import argparse
 import json
@@ -36,7 +36,7 @@ def main():
     if not os.getenv("ASCEND_RT_VISIBLE_DEVICES"):
         parser.error("Explicitly select a device")
     if args.regime == "pressure" and (not args.lease_file or args.ballast_bytes <= 0):
-        parser.error("Pressure requires an exclusive reservation and fixed physical ballast")
+        parser.error("Pressure requires explicit authorization and fixed physical ballast")
     if args.regime == "ample" and args.ballast_bytes:
         parser.error("Ample control must not allocate pressure ballast")
     trace = json.loads(args.trace.read_text())

@@ -1,9 +1,13 @@
 # Ascend three-arm experiment
 
 This is an experimental protocol, not a performance result. Run only on an
-available device. Real physical pressure additionally requires an operator's
-exclusive reservation; an empty `npu-smi` snapshot is insufficient on a shared
-server. Never manufacture a reservation record from an idle snapshot.
+available device. Real physical pressure additionally requires explicit operator
+authorization; an empty `npu-smi` snapshot is insufficient. Record an externally
+arranged exclusive reservation separately from an explicit user instruction to
+test an idle shared-server device. Never manufacture a reservation from idleness.
+The latter mode requires a fresh idle check and aborting our run on foreign work.
+Monitoring cannot guarantee that a new foreign process will avoid an allocation
+failure before detection; use enforced isolation when zero interference is required.
 
 ## Question and controls
 
@@ -103,12 +107,16 @@ The host supervisor is also responsible for recording
 the real environment and verifying exit; a request-level PASS is insufficient.
 
 Pressure mode requires `--lease-file`, `--node`, `--physical-device`, and a
-positive `--ballast-bytes`. The reservation must include matching node/device,
-`exclusive: true`, a real reservation reference, a start time and an expiry.
-This record is evidence of an externally arranged window, not a mechanism that
-reserves the hardware. At least 120 seconds must remain. The worker also rejects
-ballast allocation unless `KVCACHED_EXCLUSIVE_PRESSURE_AUDIT=1` is set by the
-supervisor. Cleanup releases ballast before shutting down model workers.
+positive `--ballast-bytes`. A record must match node/device and have a start time
+and expiry with at least 120 seconds remaining. A reservation uses
+`exclusive: true` and a real `reservation_reference`. An explicit user-directed
+idle-device test instead uses `authorization_kind: user_directed_idle_device`,
+`pressure_authorized: true`, a nonempty `authorization_reference`,
+`exclusive: false`, `external_reservation: false`, and
+`foreign_process_policy: abort_own_run`. Neither record enforces access control.
+The worker also rejects ballast allocation unless
+`KVCACHED_PRESSURE_AUDIT_AUTHORIZED=1` is set by the supervisor. Cleanup releases
+ballast before shutting down model workers.
 
 Run the CPU-only protocol checks with:
 

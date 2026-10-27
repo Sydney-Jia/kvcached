@@ -13,19 +13,30 @@ MIB = 1024 * 1024
 
 
 def check_lease(path, node, device, now=None):
-    """An operator reservation is required, not inferred from an idle snapshot.
+    """Validate explicit pressure authorization, never infer it from idleness.
 
-    This validates a reservation record; it cannot itself enforce exclusivity.
-    The host supervisor must also detect foreign jobs and abort our experiment.
+    A reservation and a user's explicit instruction to pressure-test an idle
+    device are distinct records. Neither enforces isolation. The latter must
+    require the host supervisor to abort our run when foreign work appears.
     """
     now = time.time() if now is None else now
     record = json.loads(Path(path).read_text())
+    idle_device_authorization = (
+        record.get("authorization_kind") == "user_directed_idle_device"
+        and record.get("pressure_authorized") is True
+        and bool(record.get("authorization_reference"))
+        and record.get("exclusive") is False
+        and record.get("external_reservation") is False
+        and record.get("foreign_process_policy") == "abort_own_run")
+    reservation = (record.get("authorization_kind", "exclusive_reservation")
+                   == "exclusive_reservation"
+                   and record.get("exclusive") is True
+                   and bool(record.get("reservation_reference")))
     if (record.get("node") != node or record.get("device") != device
-            or record.get("exclusive") is not True
-            or not record.get("reservation_reference")
+            or not (idle_device_authorization or reservation)
             or not record.get("starts_at", math.inf) <= now
             or record.get("expires_at", 0) - now < 120):
-        raise RuntimeError("No matching, current exclusive reservation with 120 seconds remaining")
+        raise RuntimeError("No matching explicit pressure authorization with 120 seconds remaining")
     return record
 
 
