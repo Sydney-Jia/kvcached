@@ -12,13 +12,31 @@ from functools import wraps
 from importlib.util import find_spec
 from pathlib import Path
 
-from kvcached.integration.patch_base import enable_kvcached
+from kvcached.integration.patch_base import enable_kvcached, is_integration_version_supported
 from kvcached.integration.vllm.patches import (
     GPUModelRunnerPatch,
     GPUWorkerPatch,
     _infer_attention_type,
 )
 from kvcached.utils import KVCachedConfigError
+
+
+def register_ascend_patches():
+    """Patch native classes after Ascend completes their ordinary imports.
+
+    Importing the runner eagerly from vLLM's root hook interrupts Ascend's
+    device-operator initialization and can create a circular import.
+    """
+    from wrapt.importer import when_imported
+
+    if not is_integration_version_supported("vllm", ">=0.23.0,<0.31.0"):
+        raise KVCachedConfigError("Unsupported vLLM version for Ascend elastic KV")
+    for patch in (NPUModelRunnerPatch(), NPUWorkerPatch()):
+        def apply_after_import(module, patch=patch):
+            if not patch.apply(module):
+                raise KVCachedConfigError(f"Could not apply Ascend patch {patch.patch_name}")
+
+        when_imported(patch.target_module)(apply_after_import)
 
 
 def validate_ascend_config(config):

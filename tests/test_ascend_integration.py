@@ -53,3 +53,34 @@ def test_unsupported_configuration_fails_before_worker_initialization(monkeypatc
 
 def test_single_device_explicit_budget_is_accepted():
     validate_ascend_config(config())
+
+
+def test_ascend_classes_are_patched_only_after_native_import(monkeypatch):
+    import sys
+    from kvcached.integration.vllm import ascend
+
+    callbacks, applied = {}, []
+
+    def register(name):
+        return lambda callback: callbacks.setdefault(name, callback)
+
+    class FakePatch:
+        patch_name = "test"
+
+        def __init__(self, name):
+            self.target_module = name
+
+        def apply(self, module):
+            applied.append(module)
+            return True
+
+    monkeypatch.setitem(sys.modules, "wrapt.importer", SimpleNamespace(when_imported=register))
+    monkeypatch.setattr(ascend, "is_integration_version_supported", lambda *_: True)
+    monkeypatch.setattr(ascend, "NPUModelRunnerPatch", lambda: FakePatch("test.runner"))
+    monkeypatch.setattr(ascend, "NPUWorkerPatch", lambda: FakePatch("test.worker"))
+    ascend.register_ascend_patches()
+    assert applied == []
+    assert set(callbacks) == {"test.runner", "test.worker"}
+    module = SimpleNamespace()
+    callbacks["test.worker"](module)
+    assert applied == [module]

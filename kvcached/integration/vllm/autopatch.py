@@ -78,7 +78,7 @@ def _patch_vllm(_vllm: types.ModuleType) -> None:
             (TritonAttentionPatch(), ">=0.9.0,<0.29.0"),
         ]
     if get_device_type() == "npu":
-        from kvcached.integration.vllm.ascend import NPUModelRunnerPatch, NPUWorkerPatch
+        from kvcached.integration.vllm.ascend import register_ascend_patches
 
         gpu_only = (
             GPUModelRunnerPatch, GPUModelRunnerV2Patch, ModelRunnerV2Patch,
@@ -86,10 +86,7 @@ def _patch_vllm(_vllm: types.ModuleType) -> None:
         )
         patches = [(patch, versions) for patch, versions in patches
                    if not isinstance(patch, gpu_only)]
-        patches.extend([
-            (NPUModelRunnerPatch(), ">=0.23.0,<0.31.0"),
-            (NPUWorkerPatch(), ">=0.23.0,<0.31.0"),
-        ])
+        register_ascend_patches()
     patch_manager.register_patches_with_versions(patches)
 
     # Apply all patches
