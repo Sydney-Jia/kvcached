@@ -36,7 +36,10 @@ def test_partial_reclaim_preserves_live_pages_and_virtual_addresses(native, cont
     stride = page * 2 * buffers if contiguous else page
     addresses = [tensor.data_ptr() for tensor in tensors]
     print("device", vmm.current_device_pci_bus_id(), "addresses", addresses, flush=True)
+    initial_charge = vmm.physical_budget_state()["instance_charged_bytes"]
+    bytes_per_offset = page * 2 * buffers
     assert vmm.map_to_kv_tensors([0, stride])
+    assert vmm.physical_budget_state()["instance_charged_bytes"] == initial_charge + 2 * bytes_per_offset
     # Each non-contiguous MHA tensor holds separate K and V halves.
     starts = (list(range(0, stride // 2, page // 2)) if contiguous else
               [0, 4 * page // 2] if buffers == 2 else [0])
@@ -46,6 +49,7 @@ def test_partial_reclaim_preserves_live_pages_and_virtual_addresses(native, cont
             tensor[start + stride // 2:start + stride // 2 + 32].fill_(23)
     torch.npu.synchronize()
     assert vmm.unmap_from_kv_tensors([0])
+    assert vmm.physical_budget_state()["instance_charged_bytes"] == initial_charge + bytes_per_offset
     for tensor in tensors:
         for start in starts:
             assert tensor[start + stride // 2:start + stride // 2 + 32].cpu().tolist() == [23] * 32
@@ -63,3 +67,4 @@ def test_partial_reclaim_preserves_live_pages_and_virtual_addresses(native, cont
             assert tensor[start + stride // 2:start + stride // 2 + 32].cpu().tolist() == [23] * 32
     torch.npu.synchronize()
     assert vmm.unmap_from_kv_tensors([0, stride])
+    assert vmm.physical_budget_state()["instance_charged_bytes"] == initial_charge

@@ -189,12 +189,13 @@ def delete_tp_socket_dir(ipc_name: str) -> bool:
 
 
 def get_total_gpu_memory() -> int:
-    """Return total memory of CUDA device 0 or 0 if CUDA unavailable."""
+    """Return device 0 memory for the active accelerator, or 0 if unavailable."""
     try:
-        import torch  # imported lazily to avoid heavy import cost when not needed
+        from kvcached.device import get_device_module
 
-        if torch.cuda.is_available():
-            return torch.cuda.get_device_properties(0).total_memory
+        device = get_device_module()
+        if device.is_available():
+            return device.get_device_properties(0).total_memory
     except Exception:  # pragma: no cover – best-effort helper
         pass
     return 0

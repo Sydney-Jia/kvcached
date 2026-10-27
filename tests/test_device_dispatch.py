@@ -38,3 +38,15 @@ def test_explicit_device_wins_over_default(monkeypatch):
     assert get_device_module("npu:0") is npu
     with pytest.raises(ValueError, match="Unsupported accelerator"):
         get_device_module("cpu")
+
+
+def test_cli_memory_capacity_uses_the_active_npu(monkeypatch):
+    from kvcached.cli.utils import get_total_gpu_memory
+
+    npu = SimpleNamespace(
+        is_available=lambda: True,
+        get_device_properties=lambda index: SimpleNamespace(total_memory=96 * 1024**3),
+    )
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        cuda=object(), npu=npu, version=SimpleNamespace(cuda=None, hip=None)))
+    assert get_total_gpu_memory() == 96 * 1024**3
