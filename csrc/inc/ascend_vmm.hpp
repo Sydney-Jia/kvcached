@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 
 namespace kvcached {
 namespace gpu_vmm {
@@ -30,9 +32,8 @@ inline const char *error_string(status_t status) {
 inline void check(status_t status, const char *operation, const char *file,
                   unsigned line) {
   if (!is_success(status)) {
-    std::cerr << file << ':' << line << ' ' << operation << " failed: "
-              << error_string(status) << std::endl;
-    std::abort();
+    throw std::runtime_error(std::string(file) + ':' + std::to_string(line) +
+                             " " + operation + " failed: " + error_string(status));
   }
 }
 
@@ -78,7 +79,7 @@ inline allocation_prop_t make_pinned_device_allocation_prop(int device) {
   allocation_prop_t prop{};
   prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
   prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
-  prop.memAttr = ACL_HBM_MEM;
+  prop.memAttr = ACL_HBM_MEM_HUGE;
   prop.location.type = ACL_MEM_LOCATION_TYPE_DEVICE;
   prop.location.id = device;
   return prop;

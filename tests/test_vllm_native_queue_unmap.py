@@ -95,6 +95,7 @@ def exercise_native_queue(native_step, deferred_sampling, worker_failure):
     engine.is_ec_consumer = True
     engine.is_pooling_model = False
     engine.check_for_draft_tokens = False
+    engine.log_iteration_details = False
     engine._should_throttle_prefills = lambda: False
     engine.log_error_detail = lambda *_: nullcontext()
     engine.capture_iteration_details = lambda *_: nullcontext()
