@@ -80,8 +80,12 @@ same runtime, trace, checkpoint, and experiment commit in every arm.
 
 The host supervisor must check health and actual processes immediately before
 launch, monitor foreign process entry, write the abort file, and clean up only
-processes identified by this experiment's unique token. Safe process signalling
-must handle PID reuse. The host supervisor is also responsible for recording
+processes identified by this experiment's unique token or exact, run-unique
+inherited log descriptor. Process-title changes can overwrite the environment
+memory exposed by `/proc`; an environment-only check can misidentify an engine
+and miss an orphan after reparenting. A shared log directory prefix is not a
+sufficient identity. Safe process signalling must handle PID reuse using pidfds.
+The host supervisor is also responsible for recording
 the real environment and verifying exit; a request-level PASS is insufficient.
 
 Pressure mode requires `--lease-file`, `--node`, `--physical-device`, and a
@@ -96,7 +100,8 @@ Run the CPU-only protocol checks with:
 
 ```bash
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 ENABLE_KVCACHED=false \
-python -m pytest tests/test_ascend_pressure_protocol.py -q
+python -m pytest tests/test_ascend_pressure_protocol.py \
+  tests/test_ascend_process_identity.py -q
 ```
 
 Before publishing numbers, complete all arms, repeat the paired workload with
