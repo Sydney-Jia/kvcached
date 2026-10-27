@@ -17,6 +17,11 @@ class PhysicalBudgetProbe:
             raise RuntimeError("Ballast already allocated")
         if amount <= 0 or amount % (2 * 1024 * 1024):
             raise ValueError("Ballast must be a positive multiple of 2 MiB")
+        before_cleanup = self.driver_memory_snapshot()
+        # A large allocation may otherwise return unused allocator segments to
+        # the driver. Separate that release from the ballast commitment delta.
+        torch.npu.synchronize()
+        torch.npu.empty_cache()
         before = self.driver_memory_snapshot()
         if before["free_bytes"] < amount + 32 * 1024 * 1024:
             raise RuntimeError("Insufficient physical headroom for the fixed ballast")
@@ -30,9 +35,11 @@ class PhysicalBudgetProbe:
         delta = before["free_bytes"] - after["free_bytes"]
         if abs(delta - amount) > 16 * 1024 * 1024:
             self.audit_release_ballast()
-            raise RuntimeError(f"Ballast driver delta {delta} disagrees with allocation {amount}")
+            raise RuntimeError(
+                f"Ballast driver delta {delta} disagrees with allocation {amount}; "
+                f"before_cleanup={before_cleanup}; before={before}; after={after}")
         return {"requested_bytes": amount, "driver_delta_bytes": delta,
-                "before": before, "after": after}
+                "before_allocator_cleanup": before_cleanup, "before": before, "after": after}
 
     def audit_release_ballast(self):
         import torch

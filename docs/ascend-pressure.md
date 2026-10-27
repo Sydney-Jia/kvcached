@@ -49,6 +49,14 @@ is an ordinary NPU allocation in A's worker, separate from kvcached accounting.
 Verify its actual driver-memory delta. Neither a tensor's declared size nor a
 lowered kvcached limit proves physical pressure.
 
+Before measuring the ballast allocation delta, synchronize and return A's
+unused PyTorch allocator cache to the driver. Record the readings before this
+cleanup, after cleanup, and after allocation separately. Otherwise a large
+allocation can release older cached segments concurrently, making the net
+driver change smaller than the committed ballast. Keep this step identical in
+all pressure arms; do not change the common ballast or widen the acceptance
+tolerance to hide an unexplained mismatch.
+
 The pressure arms consequently have the same remaining physical envelope,
 including weights, KV and workspaces. Differences in activation/workspace
 requirements are real costs and must remain in the measurements. Unexpected
