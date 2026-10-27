@@ -17,6 +17,7 @@ from driver_memory import driver_memory_snapshot
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--measurement", choices=("device", "process"), default="device")
     args = parser.parse_args()
     if not os.getenv("ASCEND_RT_VISIBLE_DEVICES"):
         parser.error("Select an available NPU with ASCEND_RT_VISIBLE_DEVICES")
@@ -35,13 +36,18 @@ def main():
         events.append(value)
         args.output.write_text(json.dumps(events, indent=2) + "\n")
         print(label, json.dumps(value), flush=True)
+        if args.measurement == "process":
+            measured = value["driver"]["process"]
+            assert measured["sample_range_MB"] <= 2, "Unstable process-memory samples"
+            # Negate usage to retain the same delta convention as free bytes.
+            return -measured["reported_MB"] * (1 << 20)
         assert value["driver"]["sample_range_bytes"] <= tolerance, "Unstable driver samples"
         return value["driver"]["free_bytes"]
 
     def check_delta(before, after, expected):
         assert abs((after - before) - expected) <= tolerance, {
             "observed_free_delta": after - before, "expected": expected,
-            "tolerance": tolerance, "note": "Device-wide noise can invalidate this measurement"}
+            "tolerance": tolerance, "measurement": args.measurement}
 
     # Warm the fill/copy paths before measuring. Empty the PyTorch allocator
     # so a later independent recipient must acquire backing from the driver.
@@ -100,7 +106,7 @@ def main():
             check_delta(before, uncached, 0)
         assert vmm.unmap_from_kv_tensors([0])
         record("guard-released")
-        print("PASS: independent driver deltas, retained-page controls, recipient, stable VA/live guard", flush=True)
+        print(f"PASS: {args.measurement} deltas, retained-page controls, recipient, stable VA/live guard", flush=True)
     finally:
         torch.npu.synchronize()
         vmm.shutdown_kvcached()
