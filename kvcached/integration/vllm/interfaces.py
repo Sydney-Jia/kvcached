@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from kvcached.device import get_device_module, current_device_string
+from kvcached.device import current_device_string, get_device_module
 from kvcached.kv_cache_manager import KVCacheManager
 from kvcached.observability import (
     build_runtime_snapshot,

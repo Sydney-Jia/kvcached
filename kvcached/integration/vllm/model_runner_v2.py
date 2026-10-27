@@ -143,7 +143,6 @@ def cache_geometry(config: Any) -> CacheGeometry:
 
 def allocate_kv_cache(config: Any, device: Any, layout: Any, kernel_block_sizes=None):
     """Reserve raw native storage and let vLLM construct its configured views."""
-    import torch
     from vllm.v1.kv_cache_interface import (
         UniformTypeKVCacheSpecs,
         compute_layer_kv_cache_shape_bytes,

@@ -57,6 +57,7 @@ def test_single_device_explicit_budget_is_accepted():
 
 def test_ascend_classes_are_patched_only_after_native_import(monkeypatch):
     import sys
+
     from kvcached.integration.vllm import ascend
 
     callbacks, applied = {}, []
@@ -84,3 +85,13 @@ def test_ascend_classes_are_patched_only_after_native_import(monkeypatch):
     module = SimpleNamespace()
     callbacks["test.worker"](module)
     assert applied == [module]
+
+
+def test_sglang_npu_rejected_before_applying_framework_patches(monkeypatch):
+    monkeypatch.setenv("KVCACHED_AUTOPATCH", "false")
+    from kvcached.integration.sglang import autopatch
+
+    monkeypatch.setenv("KVCACHED_AUTOPATCH", "true")
+    monkeypatch.setattr(autopatch, "get_device_type", lambda: "npu")
+    with pytest.raises(KVCachedConfigError, match="vLLM-Ascend only"):
+        autopatch._patch_sglang(SimpleNamespace())

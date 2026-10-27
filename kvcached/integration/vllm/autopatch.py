@@ -7,7 +7,6 @@ import types
 from wrapt.importer import when_imported
 
 from kvcached.device import get_device_type
-
 from kvcached.integration.patch_base import (
     PatchManager,
     is_integration_version_supported,

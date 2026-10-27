@@ -47,7 +47,6 @@ logger = get_kvcached_logger()
 
 def _worker_physical_release_barrier(worker: Any) -> bool:
     """Finish earlier worker RPCs and their CUDA work before retiring pages."""
-    import torch
 
     device = getattr(worker, "device", None)
     if device is None:
@@ -2829,7 +2828,6 @@ def _get_virtual_kv_capacity_bytes(init_snapshot: Any, cache_config: Any) -> int
 
 def _get_worker_total_memory_bytes(worker: Any) -> int:
     """Read device geometry without using mutable whole-device free memory."""
-    import torch
 
     try:
         properties = get_device_module().get_device_properties(worker.device)
@@ -3109,7 +3107,6 @@ class GPUWorkerPatch(VersionAwarePatch, BasePatch):
                 # vLLM 0.8.x has no MemorySnapshot. Resetting peak stats after
                 # model load makes this peak process-local and includes both
                 # resident model weights and the profiling activation peak.
-                import torch
 
                 get_device_module().empty_cache()
                 get_device_module().reset_peak_memory_stats()

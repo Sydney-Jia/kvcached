@@ -6,6 +6,7 @@ import types
 
 from wrapt.importer import when_imported
 
+from kvcached.device import get_device_type
 from kvcached.integration.patch_base import (
     PatchManager,
     is_integration_version_supported,
@@ -31,7 +32,7 @@ from kvcached.integration.sglang.patches import (
     UnifiedRadixCacheLimitPatch,
 )
 from kvcached.integration.sglang.shutdown import SGLangShutdownPatch
-from kvcached.utils import get_kvcached_logger
+from kvcached.utils import KVCachedConfigError, get_kvcached_logger
 
 logger = get_kvcached_logger()
 
@@ -45,6 +46,12 @@ def _patch_sglang(_sglang: types.ModuleType) -> None:
     if not _env_enabled():
         logger.debug("Disabled by KVCACHED_AUTOPATCH")
         return
+
+    if get_device_type() == "npu":
+        raise KVCachedConfigError(
+            "Ascend elastic KV currently supports vLLM-Ascend only; "
+            "the SGLang NPU integration has not been implemented"
+        )
 
     if not is_integration_version_supported("sglang", SGLANG_ALL_RANGE):
         return

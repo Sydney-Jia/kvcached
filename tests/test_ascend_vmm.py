@@ -3,8 +3,8 @@
 
 """Opt-in hardware tests: select an idle device with ASCEND_RT_VISIBLE_DEVICES."""
 
-import os
 import multiprocessing
+import os
 import traceback
 
 import pytest
@@ -19,6 +19,7 @@ pytestmark = pytest.mark.skipif(
 def native():
     import torch
     import torch_npu  # noqa: F401
+
     from kvcached import vmm_ops
 
     assert torch.npu.is_available()
@@ -77,6 +78,7 @@ def _capacity_worker(connection, name):
     try:
         import torch
         import torch_npu  # noqa: F401
+
         from kvcached import vmm_ops as vmm
 
         page = 2 * 1024 * 1024
