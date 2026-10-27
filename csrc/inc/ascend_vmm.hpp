@@ -112,8 +112,17 @@ inline status_t mem_release(allocation_handle_t handle) {
   return aclrtFreePhysical(handle);
 }
 inline status_t address_reserve(void **ptr, size_t size, size_t alignment,
-                                void *preferred_addr = nullptr) {
-  return aclrtReserveMemAddress(ptr, size, alignment, preferred_addr, 0);
+                                void * /*preferred_addr*/ = nullptr) {
+  // CANN requires expectPtr=nullptr and uses its natural page alignment.
+  // kvcached's CUDA address is an advisory hint, not a shared-pointer ABI.
+  auto prop = make_pinned_device_allocation_prop(current_device());
+  size_t granularity = 0;
+  const auto status = get_allocation_granularity(&granularity, &prop);
+  if (!is_success(status))
+    return status;
+  if (alignment != 0 && granularity % alignment != 0)
+    return ACL_ERROR_INVALID_PARAM;
+  return aclrtReserveMemAddress(ptr, size, 0, nullptr, 0);
 }
 inline status_t address_free(void *ptr, size_t /*size*/) {
   return aclrtReleaseMemAddress(ptr);
