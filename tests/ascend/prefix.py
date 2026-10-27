@@ -13,6 +13,7 @@ def main():
     parser.add_argument("--elastic", action="store_true")
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--compare-baseline", type=Path)
     args = parser.parse_args()
     if not os.getenv("ASCEND_RT_VISIBLE_DEVICES"):
         parser.error("Select an available NPU with ASCEND_RT_VISIBLE_DEVICES")
@@ -56,6 +57,13 @@ def main():
             print(index, record["tokens"], metrics, flush=True)
     finally:
         engine.llm_engine.engine_core.shutdown()
+    if args.compare_baseline:
+        baseline = json.loads(args.compare_baseline.read_text())
+        assert len(records) == len(baseline)
+        for actual, expected in zip(records, baseline):
+            assert actual["cached_tokens"] == expected["cached_tokens"]
+            assert actual["tokens"] == expected["tokens"], actual["round"]
+        print("PASS: native and elastic outputs match for the same prefix history", flush=True)
 
 
 if __name__ == "__main__":

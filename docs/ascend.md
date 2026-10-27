@@ -1,8 +1,8 @@
 # Experimental Ascend backend
 
 The Ascend backend implements the native VMM boundary with AscendCL and adds
-an opt-in vLLM-Ascend integration. The native allocator has been tested on
-Ascend950DT; end-to-end model validation is still in progress. Do not infer
+an opt-in vLLM-Ascend integration. Native allocation, single-engine Qwen
+inference, and two-engine reclamation have been tested on Ascend950DT. Do not infer
 support for other Ascend devices, engine versions, or execution modes from a
 successful build.
 
@@ -99,3 +99,69 @@ PyTorch 2.10.0, and torch_npu 2.10.0.post3. The initial engine investigation use
 vLLM metadata 0.23.0 and a customized vLLM-Ascend source snapshot. An exact
 engine compatibility matrix must be based on completed model tests, not on
 package version strings alone.
+
+### Model and runtime-control checks
+
+The manual checks in `tests/ascend/` use a local Qwen3-0.6B checkpoint,
+BF16, eager execution, one device, prefix caching, and a 512 MiB virtual
+KV budget. Run them from the repository root, after checking that the selected
+device is available. They start private offline engines, not HTTP services.
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=<available-device>
+export PYTHONPATH="$PWD/tests/ascend:$PYTHONPATH"
+export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export KVCACHED_CONTIGUOUS_LAYOUT=false
+export KVCACHED_PAGE_PREALLOC_ENABLED=false
+export KVCACHED_MIN_RESERVED_PAGES=0
+export KVCACHED_MAX_RESERVED_PAGES=0
+export KVCACHED_MAX_CACHED_TOKENS=4096
+export KVCACHED_IPC_NAME=ascend-validation
+MODEL=/path/to/local/Qwen3-0.6B
+
+timeout --kill-after=20 1200 python tests/ascend/single.py \
+  --model "$MODEL" --output native.json
+timeout --kill-after=20 1200 python tests/ascend/single.py \
+  --elastic --model "$MODEL" --output elastic.json \
+  --compare-baseline native.json
+
+timeout --kill-after=20 1200 python tests/ascend/prefix.py \
+  --model "$MODEL" --output native-prefix.json
+timeout --kill-after=20 1200 python tests/ascend/prefix.py \
+  --elastic --model "$MODEL" --output elastic-prefix.json \
+  --compare-baseline native-prefix.json
+timeout --kill-after=20 1800 python tests/ascend/dual.py \
+  --model "$MODEL" --oracle native-prefix.json --output dual.json
+```
+
+Use the same checkpoint, engine build, dtype, and generation settings for the
+native oracle and elastic checks. The prefix probe covers zero, one, and two
+cached blocks, plus a cache reset. The dual-engine check fills A's cache, lowers
+its physical limit, waits for idle reclamation, grows B, and checks A's reclaimed
+prefix and concurrent requests against the corresponding native execution path.
+It records per-request cached-token counts and physical-budget snapshots.
+
+Cold and cached prefill can produce different greedy continuations in the
+tested native Ascend stack, even without kvcached. The tests therefore compare
+matching cache states and prefix-construction history instead of assuming
+that cold and warm outputs must always be identical. This observation is
+not a diagnosis of the native stack's
+numerical behavior. Exact token agreement on these probes also does not replace
+broader model-quality evaluation or establish a throughput improvement.
+
+The tested Qwen3-0.6B checkpoint revision is
+`c1899de289a04d12100db370d81485cdf75e47ca`. A four-round, 16-request comparison
+matched all 384 output tokens. An additional eight-round prefix comparison
+matched all 128 output tokens and all returned top-five log probabilities.
+With two live engines, A's physical KV charge fell from 224 MiB to 112 MiB
+after a limit update; B subsequently grew from 112 MiB to 224 MiB. A's reclaimed
+probe had zero cached tokens and matched native cold execution. Concurrent
+cold and warm requests also matched their native reference paths.
+Those are correctness observations on the tested stack, not a compatibility
+claim for other models or versions.
+
+The installed engine emitted forced-worker-exit and semaphore-cleanup warnings
+during shutdown; the native baseline also emitted a forced-exit warning.
+After the dual-engine run, no matching test processes or live ledger entries
+remained. This bounded exit check is not a long-running lifecycle stress test.
