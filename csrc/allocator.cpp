@@ -198,9 +198,8 @@ make_shared_page(const torch::stable::Device &dev, page_id_t page_id,
     return gpu_vmm::current_device();
   };
 
-  // is_cuda() returns true for both NVIDIA (CUDA) and AMD (HIP/ROCm) devices,
-  // because PyTorch's ROCm build masquerades HIP devices as CUDA.
-  if (dev.is_cuda()) {
+  // Use the accelerator selected when building this extension.
+  if (is_accelerator_device(dev)) {
     return std::make_shared<GPUPage>(page_id, resolve_device_index(dev),
                                      page_size);
   } else if (dev.is_cpu()) {
@@ -224,7 +223,7 @@ FTensorAllocator::FTensorAllocator(const torch::stable::Device &device,
     : dev_(device), page_size_(kPageSize), num_layers_(0), num_kv_buffers_(2),
       contiguous_layout_(contiguous_layout), unified_pool_(false),
       kv_tensor_size_per_layer_(0), physical_bytes_per_offset_(0) {
-  if (dev_.is_cuda()) {
+  if (is_accelerator_device(dev_)) {
     init_gpu_();
   }
 }
@@ -384,7 +383,7 @@ int64_t FTensorAllocator::sample_budget_capacity_() {
 }
 
 void FTensorAllocator::ensure_budget_locked_() {
-  if (budget_ || !dev_.is_cuda())
+  if (budget_ || !is_accelerator_device(dev_))
     return;
   auto budget = GpuBudget::connect(
       physical_gpu_lock_path(resolve_device_index(dev_)) + ".budget-v2",
@@ -623,7 +622,7 @@ void FTensorAllocator::reserve_targets_(
       }
       required_bytes += ftensor->page_size_;
     }
-    if (dev_.is_cuda() && required_bytes != 0) {
+    if (is_accelerator_device(dev_) && required_bytes != 0) {
       ensure_budget_locked_();
       BudgetSnapshot state;
       auto record_admission = [&] {

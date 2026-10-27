@@ -7,13 +7,15 @@
 #include <cstdlib>
 #include <iostream>
 
-#if defined(KVCACHED_USE_HIP)
+#if defined(KVCACHED_USE_ASCEND)
+#include "ascend_vmm.hpp"
+#elif defined(KVCACHED_USE_HIP)
 #include <hip/hip_runtime.h>
 #elif defined(KVCACHED_USE_CUDA)
 #include <cuda.h>
 #include <cuda_runtime.h>
 #else
-#error "kvcached requires one of KVCACHED_USE_HIP or KVCACHED_USE_CUDA."
+#error "kvcached requires KVCACHED_USE_ASCEND, KVCACHED_USE_HIP or KVCACHED_USE_CUDA."
 #endif
 
 namespace kvcached {

@@ -23,6 +23,14 @@
 
 namespace kvcached {
 
+inline bool is_accelerator_device(const torch::stable::Device &device) {
+#if defined(KVCACHED_USE_ASCEND)
+  return device.type() == torch::headeronly::DeviceType::PrivateUse1;
+#else
+  return device.is_cuda();
+#endif
+}
+
 // Map a raw element size to a ScalarType. Only the width matters, so any type
 // of the right size works.
 static inline torch::headeronly::ScalarType

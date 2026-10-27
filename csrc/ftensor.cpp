@@ -58,9 +58,8 @@ static inline generic_ptr_t alloc_virtual_mem(const torch::stable::Device &dev,
 
   generic_ptr_t vaddr;
   size_t offset = g_vaddr_allocated_offset.fetch_add(size);
-  // is_cuda() returns true for both NVIDIA (CUDA) and AMD (HIP/ROCm) devices,
-  // because PyTorch's ROCm build masquerades HIP devices as CUDA.
-  if (dev.is_cuda()) {
+  // Use the accelerator selected when building this extension.
+  if (is_accelerator_device(dev)) {
     CHECK_GPU(gpu_vmm::address_reserve(
         reinterpret_cast<void **>(&vaddr), size, alignment_2mb,
         reinterpret_cast<void *>(kStartAddr + offset)));
@@ -76,7 +75,7 @@ static inline generic_ptr_t alloc_virtual_mem(const torch::stable::Device &dev,
 static inline std::unique_ptr<Page>
 make_unique_page(const torch::stable::Device &dev, page_id_t page_id,
                  size_t page_size = 0) {
-  if (dev.is_cuda()) {
+  if (is_accelerator_device(dev)) {
     return std::make_unique<GPUPage>(page_id, resolve_device_index(dev),
                                      page_size);
   } else if (dev.is_cpu()) {
@@ -104,9 +103,20 @@ FTensor::FTensor(const std::string &name, size_t size,
 
 FTensor::~FTensor() {
   if (vaddr_) {
-    if (dev_.is_cuda()) {
+    if (is_accelerator_device(dev_)) {
       // Tolerate stale VMM mappings during teardown: log, do not abort.
+#if defined(KVCACHED_USE_ASCEND)
+      // CANN unmaps one original mapping at a time, unlike CUDA/HIP ranges.
+      auto res = gpu_vmm::mem_unmap(vaddr_, page_size_);
+      for (size_t offset = page_size_; offset < size_; offset += page_size_) {
+        auto status = gpu_vmm::mem_unmap(
+            reinterpret_cast<char *>(vaddr_) + offset, page_size_);
+        if (!gpu_vmm::is_success(status))
+          res = status;
+      }
+#else
       auto res = gpu_vmm::mem_unmap(vaddr_, size_);
+#endif
       if (!gpu_vmm::is_success(res)) {
         LOGGER(ERROR, "mem_unmap during FTensor cleanup failed: %s",
                gpu_vmm::error_string(res));
@@ -142,7 +152,7 @@ bool FTensor::map(offset_t offset) {
 
   auto vaddr = reinterpret_cast<generic_ptr_t>(
       reinterpret_cast<uintptr_t>(vaddr_) + offset);
-  if (dev_.is_cuda()) {
+  if (is_accelerator_device(dev_)) {
     throw_on_gpu_error(gpu_vmm::mem_unmap(vaddr, page_size_),
                        "zero page unmap");
   }
@@ -164,7 +174,7 @@ bool FTensor::map(offset_t offset) {
       }
       throw;
     }
-    if (physical_page_mapped && dev_.is_cuda()) {
+    if (physical_page_mapped && is_accelerator_device(dev_)) {
       auto status = gpu_vmm::mem_unmap(vaddr, page_size_);
       if (!gpu_vmm::is_success(status)) {
         if (page) {
@@ -219,7 +229,7 @@ bool FTensor::map_reserved(offset_t offset, std::unique_ptr<Page> &page) {
 
   auto vaddr = reinterpret_cast<generic_ptr_t>(
       reinterpret_cast<uintptr_t>(vaddr_) + offset);
-  if (dev_.is_cuda()) {
+  if (is_accelerator_device(dev_)) {
     throw_on_gpu_error(gpu_vmm::mem_unmap(vaddr, page_size_),
                        "zero page unmap");
   }
@@ -239,7 +249,7 @@ bool FTensor::map_reserved(offset_t offset, std::unique_ptr<Page> &page) {
       }
       throw;
     }
-    if (physical_page_mapped && dev_.is_cuda()) {
+    if (physical_page_mapped && is_accelerator_device(dev_)) {
       const auto status = gpu_vmm::mem_unmap(vaddr, page_size_);
       if (!gpu_vmm::is_success(status)) {
         if (page) {
@@ -305,7 +315,7 @@ bool FTensor::unmap_retain_(offset_t offset,
 
   auto vaddr = reinterpret_cast<generic_ptr_t>(
       reinterpret_cast<uintptr_t>(vaddr_) + offset);
-  if (dev_.is_cuda()) {
+  if (is_accelerator_device(dev_)) {
     throw_on_gpu_error(gpu_vmm::mem_unmap(vaddr, page_size_),
                        "physical page unmap");
     mapping->second->record_unmap();
@@ -349,7 +359,7 @@ bool FTensor::restore_mapping_(offset_t offset,
 
   auto vaddr = reinterpret_cast<generic_ptr_t>(
       reinterpret_cast<uintptr_t>(vaddr_) + offset);
-  if (dev_.is_cuda()) {
+  if (is_accelerator_device(dev_)) {
     throw_on_gpu_error(gpu_vmm::mem_unmap(vaddr, page_size_),
                        "rollback zero page unmap");
   }
@@ -363,7 +373,7 @@ bool FTensor::restore_mapping_(offset_t offset,
     mapping_.emplace(page_id, std::move(retained_page));
   } catch (const std::exception &error) {
     std::string original_error = error.what();
-    if (physical_page_mapped && dev_.is_cuda()) {
+    if (physical_page_mapped && is_accelerator_device(dev_)) {
       auto status = gpu_vmm::mem_unmap(vaddr, page_size_);
       if (!gpu_vmm::is_success(status)) {
         throw_rollback_error("physical page restore", original_error,
@@ -402,7 +412,7 @@ void FTensor::validate_offset_(offset_t offset) const {
 }
 
 bool FTensor::set_access_(generic_ptr_t addr, size_t size) {
-  if (!dev_.is_cuda()) {
+  if (!is_accelerator_device(dev_)) {
     return true;
   }
   auto access_desc =

@@ -3,6 +3,7 @@
 
 import base64
 import hashlib
+import importlib.util
 import os
 import shutil
 import sys
@@ -74,7 +75,14 @@ def get_extensions():
 
     is_hip_build = bool(getattr(torch.version, "hip", None))
     is_cuda_build = bool(getattr(torch.version, "cuda", None))
-    if is_hip_build:
+    is_ascend_build = (
+        not is_hip_build and not is_cuda_build
+        and importlib.util.find_spec("torch_npu") is not None
+    )
+    if is_ascend_build:
+        backend_define = "-DKVCACHED_USE_ASCEND"
+        backend_name = "Ascend"
+    elif is_hip_build:
         backend_define = "-DKVCACHED_USE_HIP"
         backend_name = "HIP/ROCm"
     elif is_cuda_build:
@@ -83,7 +91,7 @@ def get_extensions():
     else:
         raise RuntimeError(
             "Unable to determine GPU backend from PyTorch. "
-            "Expected either torch.version.hip or torch.version.cuda."
+            "Expected torch.version.hip, torch.version.cuda, or torch_npu."
         )
 
     extra_compile_args = [
@@ -96,12 +104,29 @@ def get_extensions():
     # Makes any at::/c10:: usage a compile error.
     extra_compile_args.append("-DTORCH_STABLE_ONLY")
 
-    ext_include_dirs = include_paths(device_type="cuda") + [
+    torch_device_type = "cpu" if is_ascend_build else "cuda"
+    ext_include_dirs = include_paths(device_type=torch_device_type) + [
         os.path.join(CSRC_PATH, "inc")
     ]
-    ext_library_dirs = library_paths(device_type="cuda")
+    ext_library_dirs = library_paths(device_type=torch_device_type)
 
-    if is_hip_build:
+    if is_ascend_build:
+        cann_home = os.getenv("ASCEND_HOME_PATH") or os.getenv("ASCEND_HOME")
+        if not cann_home or not (Path(cann_home) / "include/acl/acl.h").is_file():
+            raise RuntimeError(
+                "Ascend builds require ASCEND_HOME_PATH pointing to a CANN "
+                "installation containing include/acl/acl.h."
+            )
+        ext_include_dirs.append(str(Path(cann_home) / "include"))
+        ext_library_dirs.append(str(Path(cann_home) / "lib64"))
+        ext_module = CppExtension(
+            "kvcached._C", csrc_files,
+            include_dirs=ext_include_dirs,
+            library_dirs=ext_library_dirs,
+            libraries=["ascendcl"],
+            extra_compile_args={"cxx": extra_compile_args},
+        )
+    elif is_hip_build:
         # HIP builds: use CppExtension to avoid PyTorch's hipify step.
         # Our code already handles HIP natively via gpu_vmm.hpp conditional
         # compilation, so hipify is unnecessary and breaks torch headers.
