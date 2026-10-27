@@ -22,6 +22,8 @@ def config():
     ("model_config", "enable_sleep_mode", True),
     ("model_config", "enforce_eager", False),
     ("parallel_config", "tensor_parallel_size", 2),
+    ("parallel_config", "decode_context_parallel_size", 2),
+    ("parallel_config", "data_parallel_size", 2),
     ("cache_config", "cache_dtype", "fp8"),
     ("cache_config", "kv_cache_memory_bytes", None),
 ])

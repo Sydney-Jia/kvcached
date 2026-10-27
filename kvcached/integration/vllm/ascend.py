@@ -45,12 +45,18 @@ def validate_ascend_config(config):
     if getattr(config.model_config, "enable_sleep_mode", False):
         raise KVCachedConfigError("Ascend elastic KV cannot also be owned by camem sleep mode")
     parallel = config.parallel_config
-    if parallel.tensor_parallel_size != 1 or parallel.pipeline_parallel_size != 1:
-        raise KVCachedConfigError("Ascend elastic KV currently requires TP=PP=1")
+    parallel_axes = (
+        "tensor_parallel_size", "pipeline_parallel_size", "data_parallel_size",
+        "decode_context_parallel_size", "prefill_context_parallel_size",
+    )
+    if any(getattr(parallel, axis, 1) != 1 for axis in parallel_axes):
+        raise KVCachedConfigError("Ascend elastic KV currently requires single-device execution")
     if getattr(config, "use_v2_model_runner", False):
         raise KVCachedConfigError("Ascend elastic KV currently requires the V1 model runner")
     if getattr(config, "kv_transfer_config", None) is not None:
         raise KVCachedConfigError("Ascend KV transfer connectors are not yet supported")
+    if getattr(config, "speculative_config", None) is not None:
+        raise KVCachedConfigError("Ascend speculative decoding is not yet supported")
     if config.cache_config.cache_dtype != "auto":
         raise KVCachedConfigError("Ascend elastic KV currently requires unquantized KV")
     if not getattr(config.cache_config, "kv_cache_memory_bytes", None):
