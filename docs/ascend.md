@@ -103,8 +103,9 @@ package version strings alone.
 ### Model and runtime-control checks
 
 The manual checks in `tests/ascend/` use a local Qwen3-0.6B checkpoint,
-BF16, eager execution, one device, prefix caching, and a 512 MiB virtual
-KV budget. Run them from the repository root, after checking that the selected
+BF16, eager execution, one device, prefix caching, and a 512 MiB configured
+KV capacity budget (not the size of the virtual address reservation).
+Run them from the repository root, after checking that the selected
 device is available. They start private offline engines, not HTTP services.
 
 ```bash
@@ -160,6 +161,20 @@ probe had zero cached tokens and matched native cold execution. Concurrent
 cold and warm requests also matched their native reference paths.
 Those are correctness observations on the tested stack, not a compatibility
 claim for other models or versions.
+
+These original numbers are kvcached ledger charges, not independently measured
+device HBM. The device had ample free capacity: B's growth does not demonstrate
+that it required A's release. No memory-pressure benefit, throughput advantage,
+or equivalence to the complete Prism system has been established.
+
+`tests/ascend/physical_probe.py --output physical.json` adds direct CANN
+`aclrtGetMemInfo(ACL_HBM_MEM)` readings, retained-handle/abort controls,
+an independent PyTorch recipient, and a PyTorch cached-free control. It checks
+three bounded 256 MiB cycles while preserving a live guard page and virtual
+addresses. Readings are device-wide and must be rejected if other workloads
+interfere. The worker probe now includes the same independent readings beside,
+not in place of, the ledger. Physical release still does not imply a serving
+performance improvement or identify the physical page IDs used by a recipient.
 
 The installed engine emitted forced-worker-exit and semaphore-cleanup warnings
 during shutdown; the native baseline also emitted a forced-exit warning.

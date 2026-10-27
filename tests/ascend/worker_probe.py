@@ -5,6 +5,11 @@
 
 
 class PhysicalBudgetProbe:
+    def driver_memory_snapshot(self):
+        from driver_memory import driver_memory_snapshot
+
+        return driver_memory_snapshot()
+
     def kvcached_physical_snapshot(self):
         import torch
 
@@ -12,4 +17,5 @@ class PhysicalBudgetProbe:
 
         torch.npu.synchronize()
         return {**vmm_ops.physical_budget_state(),
-                "pool_control": dict(_C.local_instance_control(0))}
+                "pool_control": dict(_C.local_instance_control(0)),
+                "driver": self.driver_memory_snapshot()}
