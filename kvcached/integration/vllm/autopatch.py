@@ -6,6 +6,8 @@ import types
 
 from wrapt.importer import when_imported
 
+from kvcached.device import get_device_type
+
 from kvcached.integration.patch_base import (
     PatchManager,
     is_integration_version_supported,
@@ -56,8 +58,7 @@ def _patch_vllm(_vllm: types.ModuleType) -> None:
     # Create patch manager and register version-specific vLLM patches
     patch_manager = PatchManager("vllm")
 
-    patch_manager.register_patches_with_versions(
-        [
+    patches = [
             (NixlConnectorPatch(), VLLM_ALL_RANGE),
             (ElasticBlockPoolPatch(), VLLM_ALL_RANGE),
             (EngineCorePatch(), VLLM_ALL_RANGE),
@@ -76,7 +77,20 @@ def _patch_vllm(_vllm: types.ModuleType) -> None:
             (MambaPartialTailPatch(), ">=0.28.0,<0.31.0"),
             (TritonAttentionPatch(), ">=0.9.0,<0.29.0"),
         ]
-    )
+    if get_device_type() == "npu":
+        from kvcached.integration.vllm.ascend import NPUModelRunnerPatch, NPUWorkerPatch
+
+        gpu_only = (
+            GPUModelRunnerPatch, GPUModelRunnerV2Patch, ModelRunnerV2Patch,
+            KVLayoutV2Patch, GPUWorkerPatch, TritonAttentionPatch, NixlConnectorPatch,
+        )
+        patches = [(patch, versions) for patch, versions in patches
+                   if not isinstance(patch, gpu_only)]
+        patches.extend([
+            (NPUModelRunnerPatch(), ">=0.23.0,<0.31.0"),
+            (NPUWorkerPatch(), ">=0.23.0,<0.31.0"),
+        ])
+    patch_manager.register_patches_with_versions(patches)
 
     # Apply all patches
     results = patch_manager.apply_all_patches()
