@@ -176,6 +176,24 @@ interfere. The worker probe now includes the same independent readings beside,
 not in place of, the ledger. Physical release still does not imply a serving
 performance improvement or identify the physical page IDs used by a recipient.
 
+A subsequent Qwen dual-engine run independently observed a 112 MiB increase in
+CANN-reported free HBM when A's charge fell from 224 to 112 MiB. Both sampling
+windows were stable. A kept the same process identity; its PyTorch reserved
+memory stayed at 1246 MiB. The process-memory readings corroborated this delta
+while B's reading stayed unchanged. Recomputed and concurrent cold/warm probes
+again matched their native reference histories, and the experiment exited zero.
+This establishes physical reclamation in that bounded scenario, not that B
+needed the returned capacity or that serving performance improved.
+
+The standalone three-cycle audit did not achieve a clean complete pass: two
+cycles showed exactly 256 MiB returned to the driver and consumed by an
+independent allocator, but external memory noise invalidated the third-cycle
+baseline. Other failed attempts exposed test dtype misuse and unreliable
+process-counter increments. Keep these failures in the evidence record.
+The optional process observer uses `KVCACHED_AUDIT_PHYSICAL_DEVICE` and
+`aclrtDeviceGetBareTgid` to identify its own PID; its values require calibration
+and must not automatically replace device-wide driver measurements.
+
 The installed engine emitted forced-worker-exit and semaphore-cleanup warnings
 during shutdown; the native baseline also emitted a forced-exit warning.
 After the dual-engine run, no matching test processes or live ledger entries
