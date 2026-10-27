@@ -54,8 +54,10 @@ def main():
     vmm.init_kvcached("npu:0", page, False,
                      instance_name=f"ascend-physical-audit-{os.getpid()}")
     try:
-        tensor = vmm.create_kv_tensors(2 * amount, torch.bfloat16, "npu:0", 1, 1,
-                                      page_size=page)[0]
+        # The native API takes element width, returning an integer storage
+        # tensor. Match the serving integration's explicit dtype view.
+        tensor = vmm.create_kv_tensors(2 * amount, 2, "npu:0", 1, 1,
+                                      page_size=page)[0].view(torch.bfloat16)
         assert tensor.dtype == torch.bfloat16 and tensor.element_size() == 2
         address = tensor.data_ptr()
         assert vmm.map_to_kv_tensors([0])
