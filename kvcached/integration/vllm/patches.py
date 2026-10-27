@@ -18,6 +18,7 @@ from functools import wraps
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Collection, Iterable, Mapping, Optional
 
+from kvcached.device import get_device_module
 from kvcached.integration.patch_base import BasePatch, enable_kvcached
 from kvcached.integration.version_utils import (
     VersionAwarePatch,
@@ -54,8 +55,8 @@ def _worker_physical_release_barrier(worker: Any) -> bool:
     if device is None:
         raise RuntimeError("Cannot determine the vLLM worker CUDA device")
 
-    with torch.cuda.device(device):
-        torch.cuda.synchronize()
+    with get_device_module().device(device):
+        get_device_module().synchronize()
     return True
 
 
@@ -2831,10 +2832,10 @@ def _get_worker_total_memory_bytes(worker: Any) -> int:
     import torch
 
     try:
-        properties = torch.cuda.get_device_properties(worker.device)
+        properties = get_device_module().get_device_properties(worker.device)
         return int(properties.total_memory)
     except (AttributeError, RuntimeError, TypeError, ValueError):
-        return int(torch.cuda.mem_get_info()[1])
+        return int(get_device_module().mem_get_info()[1])
 
 
 def _should_profile_cudagraph_memory(worker: Any) -> bool:
@@ -3110,12 +3111,12 @@ class GPUWorkerPatch(VersionAwarePatch, BasePatch):
                 # resident model weights and the profiling activation peak.
                 import torch
 
-                torch.cuda.empty_cache()
-                torch.cuda.reset_peak_memory_stats()
+                get_device_module().empty_cache()
+                get_device_module().reset_peak_memory_stats()
                 self.model_runner.profile_run()
                 weights_memory = 0
                 torch_peak_increase = int(
-                    torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+                    get_device_module().memory_stats()["allocated_bytes.all.peak"]
                 )
                 cudagraph_memory_estimate = 0
             else:

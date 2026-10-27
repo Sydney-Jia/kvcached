@@ -16,6 +16,12 @@ def init_kvcached(dev_str: str, page_size: int = 0,
     """Initialize native pools with the instance identity used by Python IPC."""
     from kvcached.utils import DEFAULT_IPC_NAME
 
+    # Register torch_npu's PrivateUse1 name before the C++ stable ABI parses it.
+    if dev_str.split(":", 1)[0] == "npu":
+        from kvcached.device import get_device_module
+
+        get_device_module(dev_str).set_device(dev_str)
+
     torch.ops.kvcached.init_kvcached.default(
         dev_str, page_size, contiguous_layout,
         DEFAULT_IPC_NAME if instance_name is None else instance_name)

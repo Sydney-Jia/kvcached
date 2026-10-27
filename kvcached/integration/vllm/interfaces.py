@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from kvcached.device import get_device_module, current_device_string
 from kvcached.kv_cache_manager import KVCacheManager
 from kvcached.observability import (
     build_runtime_snapshot,
@@ -105,7 +106,7 @@ def init_kvcached(
         return
 
     if device is None:
-        device = f"cuda:{torch.cuda.current_device()}"
+        device = current_device_string()
     device = normalize_gpu_device(device)
 
     _init_kvcached_impl(device, PAGE_SIZE, _contiguous_layout)
@@ -602,11 +603,11 @@ def alloc_kv_cache(
     physical_block_bytes = block_mem_bytes * (num_k_or_v if unified_pool else 1)
     page_size = get_page_size_for_block(physical_block_bytes, PAGE_SIZE)
 
-    assert torch.cuda.is_available(), "GPU backend is not available via torch.cuda."
+    assert get_device_module().is_available(), "GPU backend is not available via get_device_module()."
     device = normalize_gpu_device(device)
 
     # --- Compute per-layer memory budget and number of blocks ---
-    gpu_mem_bytes = torch.cuda.get_device_properties(device).total_memory
+    gpu_mem_bytes = get_device_module().get_device_properties(device).total_memory
     gpu_mem_bytes_per_layer_k_or_v = gpu_mem_bytes // num_layers // num_k_or_v
     # Round down to 2 * page_size for MLA backend.
     # The get_v_base_offset() requires the ftensor size (which equals

@@ -195,6 +195,9 @@ def _default_contiguous_layout() -> bool:
         import torch
         if getattr(torch.version, "hip", None):
             return False  # ROCm/HIP: non-contiguous is required for correctness
+        from kvcached.device import get_device_type
+        if get_device_type() == "npu":
+            return False  # Keep each Ascend attention layer's KV storage contiguous.
     except Exception:
         pass
     return True

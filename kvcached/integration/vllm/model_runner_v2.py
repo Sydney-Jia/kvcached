@@ -11,6 +11,7 @@ from functools import wraps
 from math import prod
 from typing import Any
 
+from kvcached.device import get_device_module
 from kvcached.integration.patch_base import BasePatch, enable_kvcached
 from kvcached.kv_geometry import check_page_geometry
 from kvcached.utils import (
@@ -195,7 +196,7 @@ def allocate_kv_cache(config: Any, device: Any, layout: Any, kernel_block_sizes=
                 "blocks (e.g. --attention-backend TRITON_ATTN)."
             )
         placements.append((tensor, spec, kernel_size))
-    per_pool_bytes = torch.cuda.get_device_properties(device).total_memory // geometry.num_pools
+    per_pool_bytes = get_device_module().get_device_properties(device).total_memory // geometry.num_pools
     page_size = get_page_size_for_block(geometry.page_bytes, PAGE_SIZE)
     per_pool_bytes = per_pool_bytes // page_size * page_size
     if config.num_blocks * geometry.page_bytes > per_pool_bytes:

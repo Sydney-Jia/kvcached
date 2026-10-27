@@ -11,6 +11,7 @@ import uuid
 from typing import Any, Dict, Optional, Tuple, cast
 
 from kvcached import vmm_ops
+from kvcached.device import get_device_module
 from kvcached.errors import MapQuarantinedError, StateConsistencyError
 from kvcached.utils import (
     get_tp_socket_dir,
@@ -39,8 +40,8 @@ def _map_to_kv_tensors_with_result(offsets: list[int], group_id: int) -> tuple[b
 def _sync_before_unmap() -> None:
     import torch
 
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    if get_device_module().is_available():
+        get_device_module().synchronize()
 
 
 # Socket directory for tensor parallel (TP) worker communication:
@@ -122,7 +123,7 @@ def resolve_gpu_device_index(device: Optional[str]) -> int:
         device_index = torch.device(normalize_gpu_device(device)).index
         if device_index is not None:
             return int(device_index)
-    return int(torch.cuda.current_device())
+    return int(get_device_module().current_device())
 
 
 # How long stop() waits for the listener thread to finish in-flight work.
@@ -336,7 +337,7 @@ def _start_worker_listener_thread(
             import torch
 
             # CUDA's current device is thread-local, so restore the worker device.
-            torch.cuda.set_device(device_index)
+            get_device_module().set_device(device_index)
         print(f"Worker {rank} IPC listener started at {socket_path}")
         while True:
             try:
