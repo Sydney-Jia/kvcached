@@ -4,6 +4,8 @@
 """Opt-in hardware tests: select an idle device with ASCEND_RT_VISIBLE_DEVICES."""
 
 import os
+import multiprocessing
+import traceback
 
 import pytest
 
@@ -68,3 +70,99 @@ def test_partial_reclaim_preserves_live_pages_and_virtual_addresses(native, cont
     torch.npu.synchronize()
     assert vmm.unmap_from_kv_tensors([0, stride])
     assert vmm.physical_budget_state()["instance_charged_bytes"] == initial_charge
+
+
+def _capacity_worker(connection, name):
+    """Each engine owns its virtual addresses; only the physical ledger is shared."""
+    try:
+        import torch
+        import torch_npu  # noqa: F401
+        from kvcached import vmm_ops as vmm
+
+        page = 2 * 1024 * 1024
+        torch.npu.set_device(0)
+        vmm.init_kvcached("npu:0", page, False, instance_name=name)
+        tensor = vmm.create_kv_tensors(8 * page, 2, "npu:0", 1, 1, page_size=page)[0]
+        connection.send({"device": vmm.current_device_pci_bus_id(), "address": tensor.data_ptr()})
+        while True:
+            command, args = connection.recv()
+            if command == "stop":
+                break
+            try:
+                if command == "limit":
+                    vmm.set_instance_budget_limit(*args)
+                elif command == "map":
+                    assert vmm.map_to_kv_tensors(args)
+                    for offset in args:
+                        tensor[offset // 2:offset // 2 + 16].fill_(71)
+                    torch.npu.synchronize()
+                elif command == "unmap":
+                    torch.npu.synchronize()
+                    assert vmm.unmap_from_kv_tensors(args)
+                elif command == "read":
+                    assert tensor[args[0] // 2:args[0] // 2 + 16].cpu().tolist() == [71] * 16
+                connection.send({"ok": True, "state": vmm.physical_budget_state()})
+            except RuntimeError as error:
+                connection.send({"ok": False, "error": str(error), "state": vmm.physical_budget_state()})
+        torch.npu.synchronize()
+        vmm.shutdown_kvcached()
+    except BaseException:
+        connection.send({"fatal": traceback.format_exc()})
+        raise
+    finally:
+        connection.close()
+
+
+def test_two_processes_rebalance_capacity_without_rewriting_live_kv(tmp_path, monkeypatch):
+    monkeypatch.setenv("KVCACHED_PHYSICAL_GROWTH_LOCK_DIR", str(tmp_path))
+    context = multiprocessing.get_context("spawn")
+    processes, connections = [], []
+
+    def receive(connection):
+        assert connection.poll(60), "NPU worker did not respond"
+        result = connection.recv()
+        assert "fatal" not in result, result
+        return result
+
+    def call(index, command, *args):
+        connections[index].send((command, args))
+        return receive(connections[index])
+
+    try:
+        for index in range(2):
+            parent, child = context.Pipe()
+            process = context.Process(target=_capacity_worker, args=(child, f"ascend-test-{index}"))
+            process.start()
+            child.close()
+            connections.append(parent)
+            processes.append(process)
+        identities = [receive(connection) for connection in connections]
+        assert identities[0]["device"] == identities[1]["device"]
+        page = 2 * 1024 * 1024
+        assert call(0, "limit", 2 * page, 1)["ok"]
+        assert call(1, "limit", 0, 1)["ok"]
+        assert call(0, "map", 0, page)["state"]["charged_bytes"] == 2 * page
+        rejected = call(1, "map", 0)
+        assert not rejected["ok"]
+        assert rejected["state"]["instance_charged_bytes"] == 0
+        assert call(0, "unmap", 0)["state"]["charged_bytes"] == page
+        assert call(0, "limit", page, 2)["ok"]
+        assert call(1, "limit", page, 2)["ok"]
+        assert call(1, "map", 0)["state"]["charged_bytes"] == 2 * page
+        assert call(0, "read", page)["ok"]
+        assert call(1, "read", 0)["ok"]
+        assert call(0, "unmap", page)["state"]["charged_bytes"] == page
+        assert call(1, "unmap", 0)["state"]["charged_bytes"] == 0
+    finally:
+        for connection, process in zip(connections, processes):
+            if process.is_alive():
+                try:
+                    connection.send(("stop", ()))
+                except (EOFError, BrokenPipeError):
+                    pass
+            process.join(10)
+            if process.is_alive():
+                process.terminate()
+                process.join(10)
+            connection.close()
+        assert all(process.exitcode == 0 for process in processes)
