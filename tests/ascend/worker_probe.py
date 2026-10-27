@@ -7,6 +7,7 @@
 class PhysicalBudgetProbe:
     def audit_allocate_ballast(self, amount):
         """Test-only physical allocation, never an artificial kvcached quota."""
+        import ctypes
         import os
 
         import torch
@@ -17,19 +18,28 @@ class PhysicalBudgetProbe:
             raise RuntimeError("Ballast already allocated")
         if amount <= 0 or amount % (2 * 1024 * 1024):
             raise ValueError("Ballast must be a positive multiple of 2 MiB")
-        before_cleanup = self.driver_memory_snapshot()
-        # A large allocation may otherwise return unused allocator segments to
-        # the driver. Separate that release from the ballast commitment delta.
-        torch.npu.synchronize()
-        torch.npu.empty_cache()
         before = self.driver_memory_snapshot()
         if before["free_bytes"] < amount + 32 * 1024 * 1024:
             raise RuntimeError("Insufficient physical headroom for the fixed ballast")
-        self._audit_ballast = torch.empty(amount // 2, dtype=torch.bfloat16, device=self.device)
-        # Touch the allocation without issuing an enormous fill kernel. CANN's
-        # driver free-memory delta, not tensor shape, establishes commitment.
-        for start in range(0, amount // 2, 128 * 1024 * 1024):
-            self._audit_ballast[start:start + 32].fill_(3)
+        # Use a separate CANN allocation. PyTorch's expandable segments can
+        # release older cache and round the new segment, changing the net HBM
+        # pressure independently of the requested tensor size.
+        runtime = ctypes.CDLL("libascendcl.so")
+        allocate = runtime.aclrtMalloc
+        allocate.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_int]
+        allocate.restype = ctypes.c_int
+        pointer = ctypes.c_void_p()
+        status = allocate(ctypes.byref(pointer), amount, 0)  # ACL_MEM_MALLOC_HUGE_FIRST
+        if status:
+            raise RuntimeError(f"CANN ballast allocation failed: {status}")
+        self._audit_ballast = (runtime, pointer)
+        touch = runtime.aclrtMemset
+        touch.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int32, ctypes.c_size_t]
+        touch.restype = ctypes.c_int
+        status = touch(pointer, amount, 3, 32)
+        if status:
+            self.audit_release_ballast()
+            raise RuntimeError(f"CANN ballast touch failed: {status}")
         torch.npu.synchronize()
         after = self.driver_memory_snapshot()
         delta = before["free_bytes"] - after["free_bytes"]
@@ -37,17 +47,26 @@ class PhysicalBudgetProbe:
             self.audit_release_ballast()
             raise RuntimeError(
                 f"Ballast driver delta {delta} disagrees with allocation {amount}; "
-                f"before_cleanup={before_cleanup}; before={before}; after={after}")
+                f"before={before}; after={after}")
         return {"requested_bytes": amount, "driver_delta_bytes": delta,
-                "before_allocator_cleanup": before_cleanup, "before": before, "after": after}
+                "allocator": "CANN aclrtMalloc ACL_MEM_MALLOC_HUGE_FIRST",
+                "before": before, "after": after}
 
     def audit_release_ballast(self):
+        import ctypes
+
         import torch
 
         if getattr(self, "_audit_ballast", None) is not None:
-            self._audit_ballast = None
             torch.npu.synchronize()
-            torch.npu.empty_cache()
+            runtime, pointer = self._audit_ballast
+            release = runtime.aclrtFree
+            release.argtypes = [ctypes.c_void_p]
+            release.restype = ctypes.c_int
+            status = release(pointer)
+            if status:
+                raise RuntimeError(f"CANN ballast release failed: {status}")
+            self._audit_ballast = None
         return {"released": True}
 
     def driver_memory_snapshot(self):

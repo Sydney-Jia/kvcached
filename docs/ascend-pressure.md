@@ -45,17 +45,17 @@ physical memory. This is a negative control, not a fixed-physical-budget result.
 For a pressure run, warm both engines and their intended workload. Derive one
 fixed ballast size from the native calibration, leaving 64 MiB driver-reported
 free headroom. Use that **same byte count** in all three pressure arms. Ballast
-is an ordinary NPU allocation in A's worker, separate from kvcached accounting.
+is an independent CANN NPU allocation in A's worker, separate from kvcached accounting.
 Verify its actual driver-memory delta. Neither a tensor's declared size nor a
 lowered kvcached limit proves physical pressure.
 
-Before measuring the ballast allocation delta, synchronize and return A's
-unused PyTorch allocator cache to the driver. Record the readings before this
-cleanup, after cleanup, and after allocation separately. Otherwise a large
-allocation can release older cached segments concurrently, making the net
-driver change smaller than the committed ballast. Keep this step identical in
-all pressure arms; do not change the common ballast or widen the acceptance
-tolerance to hide an unexplained mismatch.
+Use CANN `aclrtMalloc`/`aclrtFree` for the ballast, with a bounded `aclrtMemset`
+touch, and keep PyTorch allocator state unchanged. A PyTorch tensor is unsuitable
+for exact ballast sizing here: expandable segments can return old cache and
+round new segments, so requested tensor bytes differ from the net HBM change.
+Record CANN free memory and PyTorch allocated/reserved bytes before and after.
+Keep this mechanism identical in all arms; retain the fixed byte count and
+original physical-delta tolerance.
 
 The pressure arms consequently have the same remaining physical envelope,
 including weights, KV and workspaces. Differences in activation/workspace
