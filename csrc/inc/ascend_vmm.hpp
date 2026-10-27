@@ -5,8 +5,6 @@
 
 #include <acl/acl.h>
 #include <cstdio>
-#include <cstdlib>
-#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -33,7 +31,8 @@ inline void check(status_t status, const char *operation, const char *file,
                   unsigned line) {
   if (!is_success(status)) {
     throw std::runtime_error(std::string(file) + ':' + std::to_string(line) +
-                             " " + operation + " failed: " + error_string(status));
+                             " " + operation +
+                             " failed: " + error_string(status));
   }
 }
 
@@ -52,7 +51,8 @@ inline int current_device() {
 
 // The legacy interface name denotes a physical-device identity. Ascend UUIDs
 // remain stable when different processes use different visible-device indices.
-inline status_t device_get_pci_bus_id(char *identifier, int length, int device) {
+inline status_t device_get_pci_bus_id(char *identifier, int length,
+                                      int device) {
   if (length < 40)
     return ACL_ERROR_INVALID_PARAM;
   aclrtUuid uuid{};

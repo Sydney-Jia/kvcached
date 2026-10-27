@@ -84,6 +84,10 @@ follow_imports = "silent"
 [tool.ruff]
 line-length = 100
 
+[tool.codespell]
+# Ascend's Compute Architecture for Neural Networks toolkit.
+ignore-words-list = "cann"
+
 [tool.isort]
 profile = "black"
 line_length = 100

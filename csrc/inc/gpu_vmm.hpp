@@ -15,7 +15,8 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #else
-#error "kvcached requires KVCACHED_USE_ASCEND, KVCACHED_USE_HIP or KVCACHED_USE_CUDA."
+#error                                                                         \
+    "kvcached requires KVCACHED_USE_ASCEND, KVCACHED_USE_HIP or KVCACHED_USE_CUDA."
 #endif
 
 namespace kvcached {
