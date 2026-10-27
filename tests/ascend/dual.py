@@ -47,7 +47,10 @@ def engine_worker(connection, name, model, log):
                 params = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
                 results = engine.generate(arg, params, use_tqdm=False)
                 connection.send({"tokens": [list(result.outputs[0].token_ids) for result in results],
+                                 "cached_tokens": [result.num_cached_tokens for result in results],
                                  **snapshot()})
+            elif command == "reset":
+                connection.send({"reset": engine.reset_prefix_cache(), **snapshot()})
             elif command == "limit":
                 connection.send(set_instance_memory_limit(arg, instance_name=name))
             elif command == "snapshot":
@@ -68,6 +71,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--oracle", required=True)
     args = parser.parse_args()
     if not os.getenv("ASCEND_RT_VISIBLE_DEVICES"):
         parser.error("Select an available NPU with ASCEND_RT_VISIBLE_DEVICES")
@@ -75,6 +79,12 @@ def main():
         parser.error("--model must name a downloaded local Qwen3-0.6B directory")
     os.environ["ENABLE_KVCACHED"] = "true"
     os.environ["KVCACHED_AUTOPATCH"] = "true"
+    expected = {}
+    for item in json.loads(Path(args.oracle).read_text()):
+        hit = item["cached_tokens"]
+        assert hit not in expected or expected[hit] == item["tokens"], "Native path is unstable"
+        expected[hit] = item["tokens"]
+    assert {0, 128, 256} <= expected.keys(), expected.keys()
     output = Path(args.output)
     context = multiprocessing.get_context("spawn")
     workers, connections, events = [], [], []
@@ -95,6 +105,10 @@ def main():
         connections[index].send((command, arg))
         return receive(index)
 
+    def check_probe(value):
+        assert len(value["tokens"]) == 1
+        assert value["tokens"][0] == expected[value["cached_tokens"][0]], value
+
     try:
         for index in range(2):
             parent, child = context.Pipe()
@@ -109,11 +123,18 @@ def main():
             record(f"ready-{index}", receive(index))
 
         paragraph = "A memory manager maps virtual blocks to physical pages and preserves live data. " * 24
-        prompts = [f"Document {index}. {paragraph}\nAnswer only OK." for index in range(4)]
+        prompts = [f"Document {index}. {paragraph}\nAnswer only OK." for index in range(5)]
         reference = record("A-reference", call(0, "generate", prompts[:1]))
+        check_probe(reference)
         repeated = record("A-prefix-hit", call(0, "generate", prompts[:1]))
-        assert repeated["tokens"] == reference["tokens"]
-        primed = record("A-prime", call(0, "generate", prompts))
+        check_probe(repeated)
+        assert repeated["cached_tokens"] == [256]
+        assert record("A-reset", call(0, "reset"))["reset"]
+        # Fill earlier pages before placing the probe on a reclaimable page.
+        for index in range(1, 5):
+            record(f"A-fill-{index}", call(0, "generate", prompts[index:index+1]))
+        primed = record("A-prime", call(0, "generate", prompts[:1]))
+        check_probe(primed)
         sources = primed["control"]["gpus"]
         assert len(sources) == 1 and primed["control"]["complete_membership"], sources
         minimum = primed["physical"]["pool_control"]["minimum_bytes"]
@@ -128,18 +149,19 @@ def main():
             time.sleep(0.2)
         record("A-shrunk", shrunk)
         assert shrunk["physical"]["instance_charged_bytes"] <= minimum
-        grown = record("B-grow", call(1, "generate", prompts))
+        grown = record("B-grow", call(1, "generate", prompts[:4]))
         assert grown["physical"]["instance_charged_bytes"] > minimum
         recovered = record("A-recomputed", call(0, "generate", prompts[:1]))
-        assert recovered["tokens"] == reference["tokens"]
-        replayed = record("A-replay-all", call(0, "generate", prompts))
-        assert replayed["tokens"] == primed["tokens"]
+        assert recovered["cached_tokens"][0] < 256, "Probe backing was not reclaimed"
+        check_probe(recovered)
+        assert recovered["physical"]["instance_charged_bytes"] <= minimum
         for connection in connections:
             connection.send(("generate", prompts[:1]))
         concurrent = [record(f"concurrent-{index}", receive(index)) for index in range(2)]
-        assert all(value["tokens"] == reference["tokens"] for value in concurrent)
+        for value in concurrent:
+            check_probe(value)
         record("PASS", {"A_limit": minimum, "B_bytes": grown["physical"]["instance_charged_bytes"],
-                        "same_tokens_after_reclaim": True})
+                        "matches_native_cache_paths": True})
     finally:
         for connection, process in zip(connections, workers):
             if process.is_alive():

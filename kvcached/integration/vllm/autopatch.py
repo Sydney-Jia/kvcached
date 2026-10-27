@@ -65,24 +65,24 @@ def _patch_vllm(_vllm: types.ModuleType) -> None:
     patch_manager = PatchManager("vllm")
 
     patches = [
-            (NixlConnectorPatch(), VLLM_ALL_RANGE),
-            (ElasticBlockPoolPatch(), VLLM_ALL_RANGE),
-            (EngineCorePatch(), VLLM_ALL_RANGE),
-            (MPClientPatch(), VLLM_ALL_RANGE),
-            # CoreEngineProcManager lives in vllm.v1.engine.utils from 0.10
-            (CoreEngineProcManagerPatch(), ">=0.10.0"),
-            (GPUModelRunnerPatch(), ">=0.8.4,<0.29.0"),
-            (GPUModelRunnerV2Patch(), VLLM_028_MRV2_RANGE),
-            (ModelRunnerV2Patch(), VLLM_MRV2_RANGE),
-            (KVLayoutV2Patch(), VLLM_MRV2_RANGE),
-            (GPUWorkerPatch(), VLLM_ALL_RANGE),
-            (HybridBlockSizeAlignPatch(), VLLM_ALL_RANGE),
-            (KVCacheCoordinatorPatch(), VLLM_V9_PLUS_RANGE),
-            (KVCacheManagerPatch(), VLLM_V8_RANGE),
-            (KVCacheManagerAllocateSlotsPatch(), VLLM_ALL_RANGE),
-            (MambaPartialTailPatch(), ">=0.28.0,<0.31.0"),
-            (TritonAttentionPatch(), ">=0.9.0,<0.29.0"),
-        ]
+        (NixlConnectorPatch(), VLLM_ALL_RANGE),
+        (ElasticBlockPoolPatch(), VLLM_ALL_RANGE),
+        (EngineCorePatch(), VLLM_ALL_RANGE),
+        (MPClientPatch(), VLLM_ALL_RANGE),
+        # CoreEngineProcManager lives in vllm.v1.engine.utils from 0.10
+        (CoreEngineProcManagerPatch(), ">=0.10.0"),
+        (GPUModelRunnerPatch(), ">=0.8.4,<0.29.0"),
+        (GPUModelRunnerV2Patch(), VLLM_028_MRV2_RANGE),
+        (ModelRunnerV2Patch(), VLLM_MRV2_RANGE),
+        (KVLayoutV2Patch(), VLLM_MRV2_RANGE),
+        (GPUWorkerPatch(), VLLM_ALL_RANGE),
+        (HybridBlockSizeAlignPatch(), VLLM_ALL_RANGE),
+        (KVCacheCoordinatorPatch(), VLLM_V9_PLUS_RANGE),
+        (KVCacheManagerPatch(), VLLM_V8_RANGE),
+        (KVCacheManagerAllocateSlotsPatch(), VLLM_ALL_RANGE),
+        (MambaPartialTailPatch(), ">=0.28.0,<0.31.0"),
+        (TritonAttentionPatch(), ">=0.9.0,<0.29.0"),
+    ]
     if _target_device_type() == "npu":
         from kvcached.integration.vllm.ascend import register_ascend_patches
 

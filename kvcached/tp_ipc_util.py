@@ -38,7 +38,6 @@ def _map_to_kv_tensors_with_result(offsets: list[int], group_id: int) -> tuple[b
 
 
 def _sync_before_unmap() -> None:
-
     if get_device_module().is_available():
         get_device_module().synchronize()
 
@@ -333,8 +332,7 @@ def _start_worker_listener_thread(
 
     def listen_loop():
         if device_index is not None:
-
-            # CUDA's current device is thread-local, so restore the worker device.
+            # Accelerator contexts are thread-local; restore the worker device.
             get_device_module().set_device(device_index)
         print(f"Worker {rank} IPC listener started at {socket_path}")
         while True:
