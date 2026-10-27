@@ -6,7 +6,6 @@ import types
 
 from wrapt.importer import when_imported
 
-from kvcached.device import get_device_type
 from kvcached.integration.patch_base import (
     PatchManager,
     is_integration_version_supported,
@@ -45,6 +44,14 @@ def _env_enabled() -> bool:
     return os.getenv("KVCACHED_AUTOPATCH", "false").lower() in ("true", "1")
 
 
+def _target_device_type() -> str:
+    # Spawned workers can import vLLM before torch_npu registers torch.npu.
+    # The selected vLLM platform is authoritative at this engine boundary.
+    from vllm.platforms import current_platform
+
+    return current_platform.device_type
+
+
 @when_imported("vllm")
 def _patch_vllm(_vllm: types.ModuleType) -> None:
     if not _env_enabled():
@@ -76,7 +83,7 @@ def _patch_vllm(_vllm: types.ModuleType) -> None:
             (MambaPartialTailPatch(), ">=0.28.0,<0.31.0"),
             (TritonAttentionPatch(), ">=0.9.0,<0.29.0"),
         ]
-    if get_device_type() == "npu":
+    if _target_device_type() == "npu":
         from kvcached.integration.vllm.ascend import register_ascend_patches
 
         gpu_only = (

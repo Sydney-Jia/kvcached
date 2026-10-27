@@ -97,3 +97,16 @@ def test_sglang_npu_rejected_before_applying_framework_patches(monkeypatch):
     monkeypatch.setattr(autopatch, "get_device_type", lambda: "npu")
     with pytest.raises(KVCachedConfigError, match="vLLM-Ascend only"):
         autopatch._patch_sglang(SimpleNamespace())
+
+
+def test_vllm_platform_selects_npu_before_torch_npu_registration(monkeypatch):
+    import sys
+
+    monkeypatch.setenv("KVCACHED_AUTOPATCH", "false")
+    from kvcached.integration.vllm import autopatch
+
+    monkeypatch.setitem(sys.modules, "vllm.platforms", SimpleNamespace(
+        current_platform=SimpleNamespace(device_type="npu")))
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        version=SimpleNamespace(cuda=None, hip=None), cuda=object()))
+    assert autopatch._target_device_type() == "npu"

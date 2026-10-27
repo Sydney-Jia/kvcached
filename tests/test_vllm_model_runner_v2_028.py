@@ -222,6 +222,7 @@ def test_autopatch_routes_v2_versions_without_overlap(monkeypatch, version, expe
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_target_device_type", lambda: "cuda")
     module._patch_vllm(ModuleType("vllm"))
     selected = [
         patch.patch_name for patch, range_spec in registered

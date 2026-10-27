@@ -57,6 +57,10 @@ GPT-OSS support in SGLang updated to **v0.5.9**.
 
 ### Supported engines and models
 
+The experimental Ascend backend has a separate, narrower
+[implementation and validation contract](docs/ascend.md). The engine/model
+matrix below does not imply equivalent NPU coverage.
+
 | Engine | Versions | Attention types | Example models |
 |--------|----------|-----------------|----------------|
 | SGLang | ≥ v0.5.11 (tested up to v0.5.20) | MHA / GQA / MLA / sliding window / hybrid | DeepSeek-V3, Qwen3-8B, GPT-OSS-20B, Qwen3.5-9B, Qwen3.8-27B, Gemma-4-E2B-it |
