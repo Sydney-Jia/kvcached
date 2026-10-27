@@ -80,6 +80,10 @@ are rejected rather than served through a silently static KV allocation.
 
 ## Validation
 
+For the separately controlled three-arm capacity/latency experiment, see
+[the pressure experiment protocol](ascend-pressure.md). Its preparation and CPU
+checks are not evidence of a completed physical-pressure benchmark.
+
 Select an available device explicitly before running hardware tests:
 
 ```bash

@@ -1,5 +1,6 @@
 tests/test_alloc_rollback.py
 tests/test_ascend_integration.py
+tests/test_ascend_pressure_protocol.py
 tests/test_auto_page_size.py
 tests/test_autopatch_pth.py
 tests/test_available_size_cache.py
