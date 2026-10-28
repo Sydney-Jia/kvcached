@@ -80,6 +80,32 @@ are rejected rather than served through a silently static KV allocation.
 
 ## Validation
 
+### Optional FIA compatibility
+
+The tested Ascend950/CANN 9.1 stack can fail in its native paged TND FIA
+`sparse_mode=3` path for particular mixed prefill/decode shapes. This was also
+reproduced with ordinary NPU tensors, without kvcached. Elastic allocation does
+not fix that kernel/runtime failure.
+
+For that environment, explicitly set `KVCACHED_ASCEND_FIA_MODE=causal-window`
+before starting `vllm serve`. The worker redirects only keyword calls to paged
+TND FIA mode 3, using mode 4 with unlimited past and zero future tokens.
+It preserves tensor views, the block table, the attention mask and other
+arguments. Eager execution is required. Native mode is the default and changes
+no attention calls; this opt-in is not a general CANN fix or support for other
+devices, kernels or model architectures.
+
+For a matching native-memory reference, set `ENABLE_KVCACHED=false` and
+`KVCACHED_AUTOPATCH=true`, keeping the same FIA option. With both features off,
+use `ENABLE_KVCACHED=false KVCACHED_AUTOPATCH=false`. Compare identical
+checkpoints and cache histories; changing attention paths between the baseline
+and elastic run would confound the result.
+
+An independent synthetic probe compared six geometries against a float32
+reference (three repetitions each). This is a separate check from capacity
+sharing and does not establish accuracy for arbitrary shapes. The normal worker and the experiment
+adapter use the same implementation in `ascend_compat.py`.
+
 For the separately controlled three-arm capacity/latency experiment, see
 [the pressure experiment protocol](ascend-pressure.md). Its preparation and CPU
 checks are not evidence of a completed physical-pressure benchmark.

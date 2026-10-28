@@ -57,6 +57,58 @@ def test_single_device_explicit_budget_is_accepted():
     validate_ascend_config(config())
 
 
+@pytest.mark.parametrize("mode,eager,enabled,raises", [
+    ("native", False, False, False),
+    ("causal-window", False, False, True),
+    ("unknown", True, False, True),
+    ("causal-window", True, False, False),
+    ("causal-window", True, True, False),
+])
+def test_fia_option_preflight_and_install_order(monkeypatch, mode, eager, enabled, raises):
+    import sys
+    from kvcached.integration.vllm.ascend_compat import status
+
+    cfg = config()
+    cfg.model_config.enforce_eager = eager
+    calls = []
+    native = lambda **kwargs: kwargs
+    npu = SimpleNamespace(npu_fused_infer_attention_score=native)
+    monkeypatch.setitem(sys.modules, "torch_npu", npu)
+    monkeypatch.setenv("ENABLE_KVCACHED", str(enabled).lower())
+    monkeypatch.setenv("KVCACHED_ASCEND_FIA_MODE", mode)
+
+    class Worker:
+        vllm_config = cfg
+
+        def init_device(self):
+            assert npu.npu_fused_infer_attention_score is native
+            calls.append("native init")
+            return "initialized"
+
+        def shutdown(self):
+            pass
+
+    assert NPUWorkerPatch().apply(SimpleNamespace(NPUWorker=Worker))
+    if raises:
+        with pytest.raises(KVCachedConfigError):
+            Worker().init_device()
+        assert calls == []
+        assert status(npu) == {"enabled": False}
+    else:
+        assert Worker().init_device() == "initialized"
+        assert calls == ["native init"]
+        assert status(npu)["enabled"] == (mode == "causal-window")
+
+
+def test_fia_native_default_does_not_import_torch_npu(monkeypatch):
+    import sys
+    from kvcached.integration.vllm.ascend_compat import configure_worker
+
+    monkeypatch.delenv("KVCACHED_ASCEND_FIA_MODE", raising=False)
+    monkeypatch.setitem(sys.modules, "torch_npu", None)
+    assert configure_worker(config()) == {"enabled": False}
+
+
 def test_ascend_classes_are_patched_only_after_native_import(monkeypatch):
     import sys
 

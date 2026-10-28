@@ -40,6 +40,9 @@ def register_ascend_patches():
 
 
 def validate_ascend_config(config):
+    from kvcached.integration.vllm.ascend_compat import configured_mode
+
+    configured_mode()
     if not config.model_config.enforce_eager:
         raise KVCachedConfigError("Ascend elastic KV currently requires --enforce-eager")
     if getattr(config.model_config, "enable_sleep_mode", False):
@@ -151,9 +154,14 @@ class NPUWorkerPatch(GPUWorkerPatch):
 
         @wraps(original_init)
         def initialize(instance, *args, **kwargs):
+            from kvcached.integration.vllm.ascend_compat import configure_worker, validate_worker
+
+            validate_worker(instance.vllm_config)
             if enable_kvcached():
                 validate_ascend_config(instance.vllm_config)
-            return original_init(instance, *args, **kwargs)
+            result = original_init(instance, *args, **kwargs)
+            configure_worker(instance.vllm_config)
+            return result
 
         self._mark_as_patched(initialize, "__kvcached_ascend__")
         worker.init_device = initialize
