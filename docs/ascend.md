@@ -49,6 +49,12 @@ is not required. The installed `.pth` file registers worker import hooks in
 spawned processes as well as the frontend process. Importing only the parent
 process's patch module is insufficient for a multiprocess engine.
 
+Install the declared Python dependencies as well. A `--no-deps` wheel install
+does not install `wrapt` or `posix_ipc`; a missing `wrapt` can leave the `.pth`
+hook inactive while Python continues. Check stderr and the elastic instance's
+control membership. Launch vLLM with the interpreter that has kvcached installed
+(`python -m vllm.entrypoints.cli.main serve ...` is the CLI module entrypoint).
+
 ## Initial engine contract
 
 The integration currently accepts single-device, V1, eager MHA/GQA with one
@@ -62,7 +68,7 @@ export VLLM_USE_V2_MODEL_RUNNER=0
 export KVCACHED_IPC_NAME=example-a
 vllm serve Qwen/Qwen3-0.6B --enforce-eager \
   --max-model-len 1024 --max-num-seqs 4 \
-  --kv-cache-memory-bytes 536870912
+  --kv-cache-memory-bytes 536870912 --shutdown-timeout 60
 ```
 
 Choose an available device and an appropriate budget for the actual hardware.
@@ -106,9 +112,18 @@ reference (three repetitions each). This is a separate check from capacity
 sharing and does not establish accuracy for arbitrary shapes. The normal worker and the experiment
 adapter use the same implementation in `ascend_compat.py`.
 
+The standalone probe is `tests/ascend/fia_reference.py`, with synthetic geometry
+in `tests/ascend/fixtures/fia_mixed.json`. After selecting an available device:
+
+```bash
+ENABLE_KVCACHED=false KVCACHED_AUTOPATCH=false \
+python tests/ascend/fia_reference.py tests/ascend/fixtures/fia_mixed.json \
+  --sparse-mode 4 --verify --repeat 3
+```
+
 For the separately controlled three-arm capacity/latency experiment, see
-[the pressure experiment protocol](ascend-pressure.md). Its preparation and CPU
-checks are not evidence of a completed physical-pressure benchmark.
+[the pressure experiment protocol](ascend-pressure.md). Keep preparation and CPU
+checks separate from the completed physical-pressure observations below.
 
 Select an available device explicitly before running hardware tests:
 
@@ -194,8 +209,8 @@ claim for other models or versions.
 
 These original numbers are kvcached ledger charges, not independently measured
 device HBM. The device had ample free capacity: B's growth does not demonstrate
-that it required A's release. No memory-pressure benefit, throughput advantage,
-or equivalence to the complete Prism system has been established.
+that it required A's release. Those early probes did not establish a
+memory-pressure benefit, throughput advantage, or equivalence to Prism.
 
 `tests/ascend/physical_probe.py --output physical.json` adds direct CANN
 `aclrtGetMemInfo(ACL_HBM_MEM)` readings, retained-handle/abort controls,
@@ -228,3 +243,38 @@ The installed engine emitted forced-worker-exit and semaphore-cleanup warnings
 during shutdown; the native baseline also emitted a forced-exit warning.
 After the dual-engine run, no matching test processes or live ledger entries
 remained. This bounded exit check is not a long-running lifecycle stress test.
+
+### Completed pressure comparison
+
+A later controlled run used the same 93,463,773,184-byte AscendCL physical
+ballast in all three arms, with three repetitions of twelve requests. Native
+fixed pools, elastic held pools, and elastic reclaimed pools respectively met
+the predeclared joint TTFT/TPOT/end-to-end targets for 30/36, 23/36, and 35/36
+requests. Every request completed; complete token outputs matched the native
+reference. Two clean reclamation windows independently measured exactly 336 MiB
+returned to the driver while PyTorch reserved memory stayed unchanged.
+
+This is a bounded capacity-under-pressure result on the stated Qwen3-0.6B stack,
+not a general throughput ratio. One reclaimed request still missed its TPOT
+target. Execution order was not randomized, physical headroom was intentionally
+small, and no continuous B peak-allocation trace was collected. Do not interpret
+the result as a measured maximum concurrency or a production recommendation.
+
+### Installed HTTP and shutdown checks
+
+`tests/ascend/installed_serve.py` exercises an installed package through the
+ordinary CLI and HTTP endpoints, with no test-side attention or engine patch.
+Use a dedicated environment and an external idle-device/foreign-work supervisor.
+The probe is specific to the Qwen3-0.6B and optional Qwen2.5-0.5B geometries;
+its 112/96 MiB minimum limits must not be copied to unrelated models.
+
+The API frontend's exit does not prove that NPU workers and their control leases
+have already retired. The tested runtime defaults to immediate abort. Use a
+sufficient `--shutdown-timeout` for native resource teardown and verify both
+process exit and unavailable control membership before restarting a service.
+CANN unmaps each original mapping separately, so teardown can scale with the
+reserved KV range. A native stack capture during slow exit reached the driver's
+unmap path. A 60-second grace period completed the tested 896 MiB two-model
+case without forced-worker termination; this is not a constant bound for larger
+KV capacities. Transient "engine exit is unconfirmed" messages do not by
+themselves demonstrate a leak.
