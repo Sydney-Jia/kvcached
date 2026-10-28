@@ -20,7 +20,8 @@ def build_workloads(model, cycles):
     def chat(name, text, expected=None):
         ids = tokenizer.apply_chat_template([{'role': 'user', 'content': text}],
                                              tokenize=True, add_generation_prompt=True,
-                                             enable_thinking=False)
+                                             enable_thinking=False, return_dict=False)
+        assert isinstance(ids, list) and all(isinstance(token, int) for token in ids)
         return register(name, ids, text, expected)
 
     extraction = chat('extract-json',
