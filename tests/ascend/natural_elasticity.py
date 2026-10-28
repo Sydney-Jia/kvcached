@@ -216,9 +216,10 @@ def measure(s, name, specs, tokens):
     rec['after'] = settle(s)
     result['measurements'].append(rec)
     save()
-    peak = max((x['charged_bytes'] or 0 for x in rec['during']), default=0)
-    print('CASE', s['label'], name, 'peak_MiB', peak//MiB,
-          'after_MiB', (rec['after'][-1]['charged_bytes'] or 0)//MiB, flush=True)
+    charges = [x['charged_bytes'] for x in rec['during'] if x['charged_bytes'] is not None]
+    after = rec['after'][-1]['charged_bytes']
+    print('CASE', s['label'], name, 'peak_MiB', max(charges)//MiB if charges else 'n/a',
+          'after_MiB', after//MiB if after is not None else 'n/a', flush=True)
     return rec
 
 
