@@ -295,3 +295,32 @@ owned processes. This was an ample-memory functional check, not a pressure or
 performance benchmark; the charge values are ledger readings, not new driver
 HBM measurements. Earlier independent physical and pressure evidence remains
 separate.
+
+### Resize latency is not zero
+
+`tests/ascend/resize_latency.py` measures control acceptance, observed completion,
+driver free-memory deltas, and streamed output arrival times. The optional
+`vmm_timing_preload.cpp` observer forwards AscendCL allocation, mapping, release,
+and synchronization calls while recording their host durations. Load it only
+in the experiment's own processes. The script requires an external idle-device
+and foreign-work supervisor; it does not reserve a device.
+
+On the tested Qwen3-0.6B stack, five rounds (three traced on one device, two
+untraced on another) observed 35–220 ms for idle release of 112/336 MiB.
+An active request could take 5.5–5.9 seconds to reach the lower target while
+continuing to generate. Its maximum token arrival gap was 79–84 ms, compared
+with 28–46 ms without shrinking. The untraced runs reproduced this short stall.
+All 19,840 compared output tokens matched the corresponding no-shrink
+references. These are bounded functional/timing observations, not production
+tail-latency guarantees or a calibrated estimate of instrumentation overhead.
+
+The idle limit watcher currently polls every 200 ms. Increasing a quota does
+not eagerly allocate all permitted capacity or restore evicted prefix contents;
+allocation and recomputation costs can appear in later requests. Call durations,
+control acknowledgement, and end-to-end request latency are different metrics.
+
+The nonblocking control observer can return incomplete membership during a
+concurrent accounting update. A single such observation is not sufficient to
+declare that a running service exited. Retry within a bounded deadline while
+checking process liveness and the original instance generation; never treat an
+incomplete snapshot as proof that physical memory has been returned.
