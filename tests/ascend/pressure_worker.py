@@ -48,14 +48,19 @@ def run_worker(connection, name, model, arm, index, log):
             gpu_memory_utilization=0.10, enable_prefix_caching=(index == 0),
             enable_chunked_prefill=True, seed=42,
             worker_extension_cls="worker_probe.PhysicalBudgetProbe")
+        if os.getenv("KVCACHED_AUDIT_FIA_CAUSAL_WINDOW") == "1":
+            engine.collective_rpc("audit_enable_fia_causal_window")
         if index == 1 and os.getenv("KVCACHED_AUDIT_TRACE_FIA") == "1":
             engine.collective_rpc("audit_trace_fia", args=(log + ".fia.json",))
 
         def snapshot():
+            compatibility = engine.collective_rpc("audit_fia_compatibility_status")[0]
             if elastic:
                 return {"memory": engine.collective_rpc("kvcached_physical_snapshot")[0],
-                        "control": get_instance_memory_limit(name)}
-            return {"memory": {"driver": engine.collective_rpc("driver_memory_snapshot")[0]}}
+                        "control": get_instance_memory_limit(name),
+                        "attention_compatibility": compatibility}
+            return {"memory": {"driver": engine.collective_rpc("driver_memory_snapshot")[0]},
+                    "attention_compatibility": compatibility}
 
         def generate(prompts, output_tokens, offered_at=None, phase="generation"):
             params = SamplingParams(temperature=0, max_tokens=output_tokens, ignore_eos=True)

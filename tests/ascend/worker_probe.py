@@ -5,6 +5,16 @@
 
 
 class PhysicalBudgetProbe:
+    def audit_enable_fia_causal_window(self):
+        from fia_compatibility import install
+
+        return install()
+
+    def audit_fia_compatibility_status(self):
+        from fia_compatibility import status
+
+        return status()
+
     def audit_trace_fia(self, path):
         from fia_trace import install
 
