@@ -43,20 +43,34 @@ class PhysicalBudgetProbe:
         allocate = runtime.aclrtMalloc
         allocate.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_int]
         allocate.restype = ctypes.c_int
-        pointer = ctypes.c_void_p()
-        status = allocate(ctypes.byref(pointer), amount, 0)  # ACL_MEM_MALLOC_HUGE_FIRST
-        if status:
-            raise RuntimeError(f"CANN ballast allocation failed: {status}")
-        self._audit_ballast = (runtime, pointer)
         touch = runtime.aclrtMemset
         touch.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int32, ctypes.c_size_t]
         touch.restype = ctypes.c_int
-        status = touch(pointer, amount, 3, 32)
-        if status:
+        chunk_bytes = int(os.getenv("KVCACHED_AUDIT_BALLAST_CHUNK_BYTES", str(amount)))
+        if chunk_bytes <= 0 or chunk_bytes % (2 * 1024 * 1024):
+            raise ValueError("Ballast chunks must be positive multiples of 2 MiB")
+        pointers = []
+        self._audit_ballast = (runtime, pointers)
+        allocated_bytes = 0
+        try:
+            while allocated_bytes < amount:
+                size = min(chunk_bytes, amount - allocated_bytes)
+                pointer = ctypes.c_void_p()
+                status = allocate(ctypes.byref(pointer), size, 0)  # ACL_MEM_MALLOC_HUGE_FIRST
+                if status:
+                    raise RuntimeError(
+                        f"CANN ballast allocation failed: {status}; "
+                        f"allocated={allocated_bytes}; next={size}; before={before}")
+                pointers.append(pointer)
+                allocated_bytes += size
+                status = touch(pointer, size, 3, 32)
+                if status:
+                    raise RuntimeError(f"CANN ballast touch failed: {status}")
+            torch.npu.synchronize()
+            after = self.driver_memory_snapshot()
+        except BaseException:
             self.audit_release_ballast()
-            raise RuntimeError(f"CANN ballast touch failed: {status}")
-        torch.npu.synchronize()
-        after = self.driver_memory_snapshot()
+            raise
         delta = before["free_bytes"] - after["free_bytes"]
         if abs(delta - amount) > 16 * 1024 * 1024:
             self.audit_release_ballast()
@@ -65,6 +79,7 @@ class PhysicalBudgetProbe:
                 f"before={before}; after={after}")
         return {"requested_bytes": amount, "driver_delta_bytes": delta,
                 "allocator": "CANN aclrtMalloc ACL_MEM_MALLOC_HUGE_FIRST",
+                "chunk_bytes": chunk_bytes, "allocation_count": len(pointers),
                 "before": before, "after": after}
 
     def audit_release_ballast(self):
@@ -74,14 +89,20 @@ class PhysicalBudgetProbe:
 
         if getattr(self, "_audit_ballast", None) is not None:
             torch.npu.synchronize()
-            runtime, pointer = self._audit_ballast
+            runtime, pointers = self._audit_ballast
             release = runtime.aclrtFree
             release.argtypes = [ctypes.c_void_p]
             release.restype = ctypes.c_int
-            status = release(pointer)
-            if status:
-                raise RuntimeError(f"CANN ballast release failed: {status}")
-            self._audit_ballast = None
+            failures = []
+            retained = []
+            for pointer in reversed(pointers):
+                status = release(pointer)
+                if status:
+                    failures.append(status)
+                    retained.append(pointer)
+            self._audit_ballast = (runtime, retained) if retained else None
+            if failures:
+                raise RuntimeError(f"CANN ballast release failed: {failures}")
         return {"released": True}
 
     def driver_memory_snapshot(self):
