@@ -86,6 +86,24 @@ are rejected rather than served through a silently static KV allocation.
 
 ## Validation
 
+### Larger-model text workloads
+
+The installed package has also been compared with native KV allocation using
+Qwen3-8B BF16 on two Ascend950DT machines: 36 response comparisons and 974 output
+tokens matched, covering text extraction, code, summaries, 1K/4K/8K retrieval,
+and mixed-length/burst requests. This used eager execution, no prefix cache,
+zero physical-page reserve, and the optional FIA setting described below.
+No runtime quota was published. Stable driver observations confirmed natural
+physical return after requests; some first-shape observations also included
+workspace changes and must not be attributed entirely to KV reclamation.
+
+The manual probe is `tests/ascend/natural_elasticity.py`, with
+`--workload realistic --workload-module <frozen realistic_workloads.py>`.
+It preserves full input IDs and outputs. Run it under an idle-device/foreign-work
+supervisor. Natural EOS means these checks do not establish sustained long-decode
+performance, production tail latency, task-answer accuracy, or default reserve
+and prefix-cache behavior. Independent single-card runs do not establish TP.
+
 ### Optional FIA compatibility
 
 The tested Ascend950/CANN 9.1 stack can fail in its native paged TND FIA
