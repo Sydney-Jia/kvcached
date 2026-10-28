@@ -278,3 +278,20 @@ unmap path. A 60-second grace period completed the tested 896 MiB two-model
 case without forced-worker termination; this is not a constant bound for larger
 KV capacities. Transient "engine exit is unconfirmed" messages do not by
 themselves demonstrate a leak.
+
+A final installed-package comparison used Qwen3-0.6B and Qwen2.5-0.5B
+(`060db6499f32faf8b98477b0a26969ef7d8b9987`) on one Ascend950, with
+336 MiB configured KV capacity per engine. A concurrent eight-request,
+1536-input-token batch made B allocate additional pages before reclamation.
+A's physical-page ledger charge decreased from 224 to 112 MiB, and B's from
+192 to 96 MiB. Both limits were then restored and both models served requests;
+B also continued after A exited. All 608 output tokens from 19 ordinary,
+streaming, concurrent, and post-reclamation requests matched the corresponding
+independent native references under the same explicit FIA compatibility mode.
+All four service processes exited zero with the 60-second grace, without forced
+worker termination, remaining worker sockets, or live control membership.
+The external supervisor observed no foreign NPU processes and no remaining
+owned processes. This was an ample-memory functional check, not a pressure or
+performance benchmark; the charge values are ledger readings, not new driver
+HBM measurements. Earlier independent physical and pressure evidence remains
+separate.

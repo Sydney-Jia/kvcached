@@ -26,6 +26,7 @@ parser.add_argument('--abort-file', type=Path, required=True)
 parser.add_argument('--cycles', type=int, default=2)
 parser.add_argument('--second-model')
 parser.add_argument('--shutdown-timeout', type=int, default=0)
+parser.add_argument('--kv-bytes', type=int, default=896*1024**2)
 args = parser.parse_args()
 assert os.getenv('ASCEND_RT_VISIBLE_DEVICES'), 'Select a device explicitly'
 import kvcached
@@ -103,7 +104,7 @@ def start_service(label, elastic, model=None, namespace=None):
                '--enforce-eager', '--dtype', 'bfloat16', '--max-model-len', '2048',
                '--max-num-seqs', '8', '--max-num-batched-tokens', '512',
                '--enable-prefix-caching', '--enable-chunked-prefill',
-               '--kv-cache-memory-bytes', str(896 * 1024**2), '--seed', '0',
+               '--kv-cache-memory-bytes', str(args.kv_bytes), '--seed', '0',
                '--shutdown-timeout', str(args.shutdown_timeout)]
     record = {'label': label, 'elastic': elastic, 'name': name, 'port': port,
               'log': str(logfile), 'command': command}
@@ -142,7 +143,7 @@ def stop_service(service):
         # shutdown owns worker cleanup; the host supervisor catches leftovers.
         p.send_signal(signal.SIGTERM)
     try:
-        p.wait(45)
+        p.wait(max(45, args.shutdown_timeout + 15))
     except subprocess.TimeoutExpired:
         record['frontend_timeout'] = True
         p.kill()
@@ -221,7 +222,7 @@ try:
         checks['before_limit'] = get_instance_memory_limit(service['name'])
         checks['shrunk'] = set_limit(service, 112 * 1024**2)
         assert checks['shrunk']['gpus'][0]['charged_bytes'] < checks['before_limit']['gpus'][0]['charged_bytes']
-        checks['restored'] = set_limit(service, 896 * 1024**2)
+        checks['restored'] = set_limit(service, args.kv_bytes)
         # Shrunk pages invalidate cached prefixes. Compare a disjoint cold
         # prompt here; prefix hit/miss semantics have separate offline probes.
         checks['cold_return'] = generate(service, [44] * 800)
@@ -232,7 +233,7 @@ try:
             checks['busy_limit_accepted'] = set_limit(service, 112 * 1024**2, wait=False)
             checks['busy_outputs'] = [f.result(timeout=120) for f in pending]
         checks['busy_converged'] = set_limit(service, 112 * 1024**2)
-        checks['after_busy_restore'] = set_limit(service, 896 * 1024**2)
+        checks['after_busy_restore'] = set_limit(service, args.kv_bytes)
         checks['cancelled_stream'] = generate(service, [67]*800, tokens=512, stream=True, cancel=True)
         checks['after_cancel'] = generate(service, [68]*129)
         with http(service['port'], '/metrics') as metrics:
@@ -273,8 +274,8 @@ try:
         dual['shrink_b'] = set_limit(b,96*1024**2)
         assert dual['shrink_a']['gpus'][0]['charged_bytes'] < dual['before_a']['gpus'][0]['charged_bytes']
         assert dual['shrink_b']['gpus'][0]['charged_bytes'] < dual['before_b']['gpus'][0]['charged_bytes']
-        dual['restore_a'] = set_limit(a,896*1024**2)
-        dual['restore_b'] = set_limit(b,896*1024**2)
+        dual['restore_a'] = set_limit(a,args.kv_bytes)
+        dual['restore_b'] = set_limit(b,args.kv_bytes)
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             fa=pool.submit(generate,a,[44]*800)
             fb=pool.submit(generate,b,[45]*800)
