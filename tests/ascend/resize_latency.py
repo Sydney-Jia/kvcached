@@ -111,7 +111,16 @@ def stop(s):
     rec['forced_worker_exit']='force killing' in text
     rec['stopped']=True;save();print('STOPPED',s['label'],proc.returncode,flush=True)
 
-def query(s):return get_instance_memory_limit(s['name'])
+def query(s):
+    # The public observer deliberately returns an incomplete snapshot when
+    # a concurrent writer changes its seqlock. Do not call this service death.
+    until=time.monotonic()+5
+    while time.monotonic()<until:
+        guard();snapshot=get_instance_memory_limit(s['name'])
+        if snapshot['complete_membership']:return snapshot
+        if s['process'].poll() is not None:raise RuntimeError('Service exited')
+        time.sleep(.005)
+    raise TimeoutError(snapshot)
 def charge(snap):return sum(g['charged_bytes'] for g in snap['gpus'])
 
 def limit(s, size):
@@ -119,16 +128,21 @@ def limit(s, size):
     published=set_instance_memory_limit(size,instance_name=s['name'])
     accepted=time.monotonic_ns()
     assert published['accepted'],published
+    generations={g['gpu']:g['generation'] for g in published['gpus']}
     rec=dict(start_ns=t,accepted_ns=accepted,target=size,published=published,polls=[])
     deadline=time.monotonic()+45
     while time.monotonic()<deadline:
-        guard();t0=time.monotonic_ns();snap=query(s);t1=time.monotonic_ns()
+        guard();t0=time.monotonic_ns();snap=get_instance_memory_limit(s['name']);t1=time.monotonic_ns()
         rec['polls'].append(dict(start_ns=t0,end_ns=t1,charged=charge(snap),
-                                  converged=snap['converged'],status=snap['status']))
+                                  converged=snap['converged'],status=snap['status'],
+                                  complete_membership=snap['complete_membership']))
+        if snap['complete_membership']:
+            assert {g['gpu']:g['generation'] for g in snap['gpus']}==generations,'Instance replaced'
         if snap['converged']:
             rec.update(end_ns=t1,final=snap)
             return rec
-        if snap['status'] in ('failed','unsupported','unavailable'):raise RuntimeError(snap)
+        if snap['status'] in ('failed','unsupported'):raise RuntimeError(snap)
+        if s['process'].poll() is not None:raise RuntimeError('Service exited during resize')
         time.sleep(.005)
     raise TimeoutError(rec)
 
