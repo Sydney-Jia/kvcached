@@ -27,6 +27,8 @@ p.add_argument('--dtype', choices=('bfloat16', 'float16'), required=True)
 p.add_argument('--kv-mib', type=int, required=True)
 p.add_argument('--cycles', type=int, default=4)
 p.add_argument('--include-default-reserve', action='store_true')
+p.add_argument('--workload', choices=('synthetic', 'realistic'), default='synthetic')
+p.add_argument('--workload-module', type=Path)
 p.add_argument('--output', type=Path, required=True)
 p.add_argument('--abort-file', type=Path, required=True)
 a = p.parse_args()
@@ -159,16 +161,21 @@ def stop(s):
 def generate(s, specs, tokens):
     # One batch payload preserves admission ordering across the reference and
     # elastic arms. All generated token IDs, not just text fragments, are saved.
-    prompts = [[token]*length for token, length in specs]
+    prompts = ([spec['token_ids'] for spec in specs] if a.workload == 'realistic'
+               else [[token]*length for token, length in specs])
     payload = dict(model='syd-model', prompt=prompts, max_tokens=tokens,
-                   temperature=0, ignore_eos=True, return_token_ids=True)
+                   temperature=0, ignore_eos=a.workload != 'realistic', return_token_ids=True)
     start_ns = time.monotonic_ns()
     with http(s, '/v1/completions', payload) as response:
         data = json.load(response)
     choices = sorted(data['choices'], key=lambda choice: choice['index'])
     ids = [choice['token_ids'] for choice in choices]
-    assert len(ids) == len(specs) and all(len(row) == tokens for row in ids)
-    return dict(start_ns=start_ns, end_ns=time.monotonic_ns(), token_ids=ids, usage=data.get('usage'))
+    assert len(ids) == len(specs) and all(0 < len(row) <= tokens for row in ids)
+    if a.workload != 'realistic':
+        assert all(len(row) == tokens for row in ids)
+    return dict(start_ns=start_ns, end_ns=time.monotonic_ns(), token_ids=ids,
+                texts=[c['text'] for c in choices], finish_reasons=[c['finish_reason'] for c in choices],
+                usage=data.get('usage'))
 
 
 # Constant observer context for every arm. Only this thread calls AscendCL.
@@ -204,7 +211,9 @@ def settle(s):
 
 
 def measure(s, name, specs, tokens):
-    rec = dict(arm=s['label'], workload=name, specs=specs, tokens=tokens,
+    descriptions = ([{k: x[k] for k in ('name', 'input_tokens', 'sha256')} for x in specs]
+                    if a.workload == 'realistic' else specs)
+    rec = dict(arm=s['label'], workload=name, specs=descriptions, tokens=tokens,
                before=settle(s), during=[])
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(generate, s, specs, tokens)
@@ -229,6 +238,16 @@ workloads = [('single-'+str(n), [(41+i, n)], 32)
              for i, n in enumerate((32, 129, 1024, 4096, 8192))]
 for cycle in range(a.cycles):
     workloads.extend([(f'mixed-{cycle}', mixed, 64), (f'burst-{cycle}', burst, 64)])
+warm_single = [(91, 8192)]
+if a.workload == 'realistic':
+    import importlib.util
+    if not a.workload_module:
+        raise ValueError('A frozen workload module path is required')
+    spec = importlib.util.spec_from_file_location('syd_realistic_workloads', a.workload_module)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    workloads, warm_single, burst, prompts = module.build_workloads(a.model, a.cycles)
+    result['prompt_manifest'] = prompts
 
 save()
 try:
@@ -237,7 +256,7 @@ try:
     for arm in arms:
         service = start(arm)
         # Warm the widest individual context and simultaneous burst in all arms.
-        service['record']['warmup'] = [generate(service, [(91, 8192)], 16),
+        service['record']['warmup'] = [generate(service, warm_single, 16),
                                        generate(service, burst, 16)]
         service['record']['after_warmup'] = settle(service)
         for name, specs, tokens in workloads:
