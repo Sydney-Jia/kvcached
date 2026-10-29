@@ -110,6 +110,13 @@ class NativeElasticWorker(NPUWorker):
         if pool is None:
             raise RuntimeError("Native elastic pool is not initialized")
         started = time.monotonic()
+        def memory_state():
+            free, total = torch.npu.mem_get_info()
+            return {'free_bytes': free, 'total_bytes': total,
+                    'torch_allocated_bytes': torch.npu.memory_allocated(),
+                    'torch_reserved_bytes': torch.npu.memory_reserved()}
+
+        memory_before = memory_state()
         reclaimed = 0
         if action == 'elastic':
             reclaimed = pool.reclaim(self.native_live_blocks.live_blocks())
@@ -119,9 +126,17 @@ class NativeElasticWorker(NPUWorker):
             pool.ensure(full=True)
             torch.npu.synchronize()
             pool.elastic = False
+        elif action == 'trim_allocator':
+            # This is separate from KV retirement: framework workspaces can
+            # retain physical capacity even after every unused KV page is gone.
+            # Apply identically in matched held/elastic trials, and report its
+            # own driver delta rather than attributing it to KV elasticity.
+            torch.npu.synchronize()
+            torch.npu.empty_cache()
         elif action != 'status':
             raise ValueError(f"Unknown native KV control action: {action}")
         result = dict(pool.status(), action=action, reclaimed_bytes=reclaimed,
+                    memory_before=memory_before, memory_after=memory_state(),
                     physical_device=vmm_ops.current_device_pci_bus_id(),
                     physical_budget=dict(vmm_ops.physical_budget_state()),
                     live_requests=len(self.native_live_blocks.requests),

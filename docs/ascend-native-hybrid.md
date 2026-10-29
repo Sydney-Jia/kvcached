@@ -50,6 +50,16 @@ This experiment does **not yet** implement scheduler capacity feedback for a
 failed physical grow, or a coordinated TP/DP rollback. Such a failure must stop
 the trial rather than be presented as transparent resource sharing.
 
+The separate `trim_allocator` diagnostic synchronizes device work and calls
+`torch.npu.empty_cache()` to release unused **framework allocator** blocks.
+It does not retire KV pages, evict live tensors or change the pool mode. Every
+control reports driver free memory and Torch allocated/reserved memory before
+and after the action. This distinction matters when temporary operator buffers
+grow the framework cache and consume capacity returned by the KV allocator.
+Matched experiments must apply this diagnostic to both held and elastic
+conditions and report its memory delta separately. It is not automatic
+cross-engine admission or a remedy for genuinely live-memory exhaustion.
+
 CPU tests cover ownership and partial-page boundaries, cross-backing growth
 rollback, transactional retirement and alias preservation. They do not prove
 NPU kernel correctness. Hardware acceptance must separately record native,
