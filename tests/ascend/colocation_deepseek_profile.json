@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "eight-card-tp2-dspark-colocate",
+  "description": "EP8 TP2 DP4 DSpark k5 eager, 0.65 memory utilization co-location candidate",
+  "topology": "combined",
+  "release": "megamoe-ep8",
+  "engine": {
+    "tokenizer-mode": "deepseek_v41",
+    "tensor-parallel-size": 2,
+    "data-parallel-size": 4,
+    "enable-expert-parallel": true,
+    "quantization": "deepseek_v4_fp8",
+    "max-model-len": 4096,
+    "max-num-batched-tokens": 2048,
+    "max-num-seqs": 8,
+    "gpu-memory-utilization": 0.65,
+    "block-size": 128,
+    "enable-prefix-caching": false,
+    "swa-bounded-replay": false,
+    "limit-mm-per-prompt": {
+      "image": 0
+    },
+    "engram-config": {
+      "cpu_offload": true,
+      "dp_shared_memory": true,
+      "embedding_across_dp": false
+    },
+    "model-loader-extra-config": {
+      "enable_multithread_load": true,
+      "num_threads": 4
+    },
+    "safetensors-load-strategy": "lazy",
+    "additional-config": {
+      "enable_cpu_binding": false,
+      "enable_fused_mc2": 0
+    },
+    "enforce-eager": true,
+    "async-scheduling": false,
+    "disable-nccl-for-dp-synchronization": true,
+    "speculative-config": {
+      "method": "dspark",
+      "num_speculative_tokens": 5,
+      "enforce_eager": true
+    }
+  },
+  "environment": {
+    "VLLM_PLUGINS": "ascend,ascend_model,ascend_model_loader,ascend_kv_connector",
+    "VLLM_USE_V2_MODEL_RUNNER": "1",
+    "VLLM_ENGINE_READY_TIMEOUT_S": "36000",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "MAX_JOBS": "2",
+    "CMAKE_BUILD_PARALLEL_LEVEL": "2",
+    "OMP_NUM_THREADS": "2",
+    "HCCL_INTRA_ROCE_ENABLE": "0",
+    "HCCL_INTRA_PCIE_ENABLE": "0",
+    "HCCL_OP_EXPANSION_MODE": "AIV",
+    "HCCL_BUFFSIZE": "400",
+    "VLLM_ASCEND_SYD_DEEPGEMM_MOE": "1",
+    "DG_USE_LOCAL_VERSION": "0",
+    "HCCL_HOST_SOCKET_PORT_RANGE": "auto",
+    "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+    "HCCL_CONNECT_TIMEOUT": "120",
+    "HCCL_EXEC_TIMEOUT": "120",
+    "DG_JIT_LAUNCH_TIMEOUT": "120"
+  },
+  "evidence": "Candidate only. Derived from launcher 485e4803649eb4af0b27f14f69105e6d1ab070a7; only gpu-memory-utilization changed from 0.90 to 0.65. All three arms use this profile."
+}
