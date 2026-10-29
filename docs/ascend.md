@@ -20,9 +20,12 @@ For the consolidated evidence boundary and next acceptance gates, see the
 - kvcached owns the physical backing of its KV tensors. AscendCL reserves
   virtual addresses separately from physical HBM allocation. Mapping and
   unmapping pages change physical occupancy without moving the tensor base.
-- Tensor storage uses the PyTorch stable ABI and the registered `npu`
-  PrivateUse1 device. Native read/write tests cover this storage boundary;
-  it does not require an alternative attention kernel.
+- Tensor storage uses the registered `npu` PrivateUse1 device. This experimental
+  branch uses torch_npu's native `from_blob` factory to create NPU storage
+  metadata, then hands the Tensor handle to the stable wrapper. The generic
+  stable factory used in the 2026-10-29 artifact was insufficient for the hybrid
+  model's convolution state. The native factory is isolated in
+  `csrc/ascend_tensor.cpp`; its ABI is coupled to the installed torch_npu build.
 - A physical device UUID identifies the shared allocation budget across
   processes with different visible-device numbering. Each process retains its
   own tensor addresses and KV contents: capacity sharing is not content sharing.
@@ -40,8 +43,9 @@ by mapping; peer-device access is outside this backend's current contract.
 
 Use a dedicated environment containing matching PyTorch and torch_npu packages,
 CANN headers/libraries, and the usual kvcached Python dependencies. The extension
-requires the same PyTorch stable ABI baseline as other kvcached backends
-(PyTorch 2.10 or later).
+requires PyTorch 2.10 or later. Unlike the CUDA/HIP stable-ABI path, this Ascend
+candidate must be built and validated against matching PyTorch/torch_npu
+headers and libraries. Cross-version wheel compatibility is not established.
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -51,7 +55,8 @@ python -m pip install --no-build-isolation .
 
 The build selects Ascend when torch_npu is installed and the PyTorch build has
 neither CUDA nor HIP enabled. It links against `ascendcl`; a CUDA installation
-is not required. The installed `.pth` file registers worker import hooks in
+is not required. This candidate also links `torch_npu` for its native tensor
+factory. The installed `.pth` file registers worker import hooks in
 spawned processes as well as the frontend process. Importing only the parent
 process's patch module is insufficient for a multiprocess engine.
 
