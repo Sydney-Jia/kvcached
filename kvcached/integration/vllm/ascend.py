@@ -109,6 +109,18 @@ class NPUModelRunnerPatch(GPUModelRunnerPatch):
                 interfaces.init_kvcached(is_worker=True, device=str(instance.device))
 
         runner.__init__ = initialize
+        original_specs = runner.get_kv_cache_spec
+
+        @wraps(original_specs)
+        def cache_specs(instance, *args, **kwargs):
+            specs = original_specs(instance, *args, **kwargs)
+            if enable_kvcached() and instance.vllm_config.additional_config.get("kvcached_ascend_hybrid", False):
+                from kvcached.integration.vllm.ascend_hybrid import normalize_hybrid_specs
+
+                return normalize_hybrid_specs(specs)
+            return specs
+
+        runner.get_kv_cache_spec = cache_specs
         self.add_kvcache_allocator(runner)
         self.add_reshape_methods(runner)
         generic_allocate = runner._allocate_kv_cache_from_kvcached
