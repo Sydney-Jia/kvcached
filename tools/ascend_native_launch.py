@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--mode', choices=('native', 'elastic'), required=True)
     parser.add_argument('--release', type=Path)
     parser.add_argument('--serialize-stream-init', action='store_true')
+    parser.add_argument('--allow-shared-devices', action='store_true')
     args = parser.parse_args()
     if args.output_dir.exists():
         parser.error('Use a fresh output directory')
@@ -54,14 +55,14 @@ def main():
                           'serialized_stream_init': args.serialize_stream_init,
                           'kvcached_release': str(args.release) if args.release else None}
     plan['api'] = 'http://127.0.0.1:' + str(plan['local']['roles']['combined']['port'])
-    result = check(args.launcher, plan, full_weights=False, allow_shared=False)
+    result = check(args.launcher, plan, full_weights=False, allow_shared=args.allow_shared_devices)
     args.output_dir.mkdir(parents=True)
     env = runtime_environment(plan, args.output_dir)
     save_json(args.output_dir / 'plan.json', plan)
     save_json(args.output_dir / 'preflight.json', result)
     save_json(args.output_dir / 'environment.json', env)
     devices = plan['local']['roles']['combined']['devices']
-    save_json(args.output_dir / 'device-prelaunch.json', inspect_devices(devices, False))
+    save_json(args.output_dir / 'device-prelaunch.json', inspect_devices(devices, args.allow_shared_devices))
     print(json.dumps(plan['experiment']), flush=True)
     os.chdir(args.output_dir)
     os.execvpe(command[0], command, env)
