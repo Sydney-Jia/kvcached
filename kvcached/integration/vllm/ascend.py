@@ -115,14 +115,31 @@ class NPUModelRunnerPatch(GPUModelRunnerPatch):
         generic_reshape = runner._reshape_kv_cache_tensors_from_kvcached
 
         def allocate(instance, config):
-            if len(config.kv_cache_groups) != 1 or _infer_attention_type(config) not in ("MHA", "GQA"):
+            attention_type = _infer_attention_type(config)
+            hybrid = (instance.vllm_config.additional_config.get("kvcached_ascend_hybrid", False)
+                      and attention_type == "HYBRID_LINEAR")
+            if not hybrid and (len(config.kv_cache_groups) != 1 or attention_type not in ("MHA", "GQA")):
                 raise KVCachedConfigError("Ascend elastic KV currently supports one MHA/GQA group")
-            spec = config.kv_cache_groups[0].kv_cache_spec
+            if hybrid:
+                if instance.vllm_config.cache_config.enable_prefix_caching:
+                    raise KVCachedConfigError("Ascend hybrid experiment excludes prefix caching")
+                for group in config.kv_cache_groups:
+                    candidate = group.kv_cache_spec
+                    if type(candidate).__name__ == "FullAttentionSpec":
+                        continue
+                    if (type(candidate).__name__ == "MambaSpec"
+                            and candidate.mamba_cache_mode == "none"
+                            and candidate.num_speculative_blocks == 0):
+                        continue
+                    raise KVCachedConfigError("Unsupported Ascend hybrid state lifetime")
+            spec = (next(group.kv_cache_spec for group in config.kv_cache_groups
+                         if type(group.kv_cache_spec).__name__ == "FullAttentionSpec")
+                    if hybrid else config.kv_cache_groups[0].kv_cache_spec)
             if getattr(spec, "head_size_v", spec.head_size) != spec.head_size:
                 raise KVCachedConfigError("Ascend K and V head dimensions must match")
             if getattr(instance, "use_sparse", False) or getattr(instance, "use_compress", False):
                 raise KVCachedConfigError("Ascend compressed/sparse KV is not yet supported")
-            instance.hybrid_with_attn_and_mamba = False
+            instance.hybrid_with_attn_and_mamba = hybrid
             return generic_allocate(instance, config)
 
         def reshape(instance, config, raw_tensors, *args, **kwargs):
