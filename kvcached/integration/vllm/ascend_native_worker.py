@@ -107,6 +107,7 @@ class NativeElasticWorker(NPUWorker):
         elif action == 'held':
             # Grow only free backing; a failed grow rolls back its new pages.
             pool.ensure(full=True)
+            torch.npu.synchronize()
             pool.elastic = False
         elif action != 'status':
             raise ValueError(f"Unknown native KV control action: {action}")

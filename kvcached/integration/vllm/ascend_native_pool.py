@@ -22,6 +22,8 @@ class NativeKVPool:
         self.raw = {}
         self.elastic = False
         self.poisoned = False
+        self.grown_bytes = 0
+        self.reclaimed_bytes = 0
         operations.init_kvcached(str(device), self.backings[0].page_bytes, False, instance_name)
         for backing in self.backings:
             tensors = operations.create_kv_tensors(
@@ -89,7 +91,9 @@ class NativeKVPool:
                 self.poisoned = True
                 raise RuntimeError("Native KV growth rollback failed; stop this worker") from rollback
             raise
-        return sum(len(offsets) for offsets in added.values()) * self.backings[0].page_bytes
+        grown = sum(len(offsets) for offsets in added.values()) * self.backings[0].page_bytes
+        self.grown_bytes += grown
+        return grown
 
     def reclaim(self, live_blocks):
         if self.poisoned:
@@ -124,10 +128,14 @@ class NativeKVPool:
             # preserve evidence and fail closed rather than invent a rollback.
             self.poisoned = True
             raise
-        return sum(len(offsets) for offsets in retiring.values()) * self.backings[0].page_bytes
+        reclaimed = sum(len(offsets) for offsets in retiring.values()) * self.backings[0].page_bytes
+        self.reclaimed_bytes += reclaimed
+        return reclaimed
 
     def status(self):
         return {'elastic': self.elastic, 'poisoned': self.poisoned,
+                'grown_bytes_total': self.grown_bytes,
+                'reclaimed_bytes_total': self.reclaimed_bytes,
                 'num_blocks': self.num_blocks,
                 'reserved_bytes': sum(b.reservation_bytes for b in self.backings),
                 'mapped_bytes': sum(len(self.mapped[b.group_id]) * b.page_bytes for b in self.backings),
