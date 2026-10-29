@@ -119,11 +119,14 @@ def get_extensions():
             )
         ext_include_dirs.append(str(Path(cann_home) / "include"))
         ext_library_dirs.append(str(Path(cann_home) / "lib64"))
+        npu_root = Path(importlib.util.find_spec("torch_npu").origin).parent
+        ext_include_dirs.append(str(npu_root / "include"))
+        ext_library_dirs.append(str(npu_root / "lib"))
         ext_module = CppExtension(
             "kvcached._C", csrc_files,
             include_dirs=ext_include_dirs,
             library_dirs=ext_library_dirs,
-            libraries=["ascendcl"],
+            libraries=["ascendcl", "torch_npu"],
             extra_compile_args={"cxx": extra_compile_args},
         )
     elif is_hip_build:
@@ -157,7 +160,8 @@ def get_extensions():
                 "nvcc": extra_compile_args,
             },
         )
-    print(f"Building kvcached._C with backend: {backend_name} (stable ABI)")
+    abi = "version-coupled torch_npu tensor factory" if is_ascend_build else "stable ABI"
+    print(f"Building kvcached._C with backend: {backend_name} ({abi})")
     return [ext_module], {"build_ext": BuildExtension}
 
 

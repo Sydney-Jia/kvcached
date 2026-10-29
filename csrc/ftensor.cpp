@@ -20,6 +20,11 @@
 
 namespace kvcached {
 
+#if defined(KVCACHED_USE_ASCEND)
+AtenTensorHandle ascend_from_blob(void *data, int64_t count, int dtype,
+                                 int device_index);
+#endif
+
 namespace {
 
 template <typename Status>
@@ -97,8 +102,17 @@ FTensor::FTensor(const std::string &name, size_t size,
   auto num_elems = static_cast<int64_t>(size / element_size(dtype_));
   std::vector<int64_t> sizes = {num_elems};
   std::vector<int64_t> strides = {1};
-  tensor_ = torch::stable::from_blob(reinterpret_cast<void *>(vaddr_), sizes,
-                                     strides, dev_, dtype_);
+#if defined(KVCACHED_USE_ASCEND)
+  if (is_accelerator_device(dev_)) {
+    tensor_ = torch::stable::Tensor(ascend_from_blob(
+        reinterpret_cast<void *>(vaddr_), num_elems, static_cast<int>(dtype_),
+        dev_.index()));
+  } else
+#endif
+  {
+    tensor_ = torch::stable::from_blob(reinterpret_cast<void *>(vaddr_), sizes,
+                                      strides, dev_, dtype_);
+  }
 }
 
 FTensor::~FTensor() {
