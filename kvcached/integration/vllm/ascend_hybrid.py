@@ -15,6 +15,12 @@ from math import prod
 from kvcached.utils import KVCachedConfigError
 
 
+def validate_hybrid_model(model_config):
+    text_config = getattr(model_config, "hf_text_config", None)
+    if getattr(text_config, "model_type", None) != "qwen3_5_text":
+        raise KVCachedConfigError("Ascend hybrid candidate is limited to Qwen3.5 GDN text models")
+
+
 def normalize_hybrid_specs(specs):
     attention = [s for s in specs.values() if type(s).__name__ == "FullAttentionSpec"]
     states = [s for s in specs.values() if type(s).__name__ == "MambaSpec"]

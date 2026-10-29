@@ -10,6 +10,19 @@ For the consolidated evidence boundary and next acceptance gates, see the
 [2026-10-29 checkpoint](ascend-status.md). Test entry points are listed in the
 [Ascend probe guide](../tests/ascend/README.md).
 
+This branch additionally contains a bounded hybrid candidate, enabled by
+`additional_config.kvcached_ascend_hybrid=true`. It is limited to Qwen3.5 GDN
+text models (`hf_text_config.model_type=qwen3_5_text`). It accepts homogeneous full
+attention plus Mamba cache mode `none`, with prefix caching and speculation off.
+It normalizes shared cells before KV planning and preserves state shapes/dtypes.
+The tested kernel snapshot does not correctly update generic strided GDN
+states. Worker-local wrappers therefore gather only active state rows into
+compact tensors, invoke the native convolution/recurrent operators, and copy
+the updated rows back. This adds per-step memory traffic and is not equivalent
+to simply changing an allocator. Never materialize the entire virtual state
+pool: unused rows may have no physical backing. Complete model validation,
+including repeated mixed-request recycling, is an independent acceptance gate.
+
 ## Ownership and integration
 
 - vLLM's request and block-table semantics are preserved. The integration hooks

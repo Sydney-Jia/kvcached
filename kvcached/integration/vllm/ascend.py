@@ -133,9 +133,9 @@ class NPUModelRunnerPatch(GPUModelRunnerPatch):
             if not hybrid and (len(config.kv_cache_groups) != 1 or attention_type not in ("MHA", "GQA")):
                 raise KVCachedConfigError("Ascend elastic KV currently supports one MHA/GQA group")
             if hybrid:
-                from kvcached.integration.vllm.ascend_hybrid import install_state_bridge
+                from kvcached.integration.vllm.ascend_hybrid import install_state_bridge, validate_hybrid_model
 
-                install_state_bridge()
+                validate_hybrid_model(instance.vllm_config.model_config)
                 if instance.vllm_config.cache_config.enable_prefix_caching:
                     raise KVCachedConfigError("Ascend hybrid experiment excludes prefix caching")
                 for group in config.kv_cache_groups:
@@ -147,6 +147,7 @@ class NPUModelRunnerPatch(GPUModelRunnerPatch):
                             and candidate.num_speculative_blocks == 0):
                         continue
                     raise KVCachedConfigError("Unsupported Ascend hybrid state lifetime")
+                install_state_bridge()
             spec = (next(group.kv_cache_spec for group in config.kv_cache_groups
                          if type(group.kv_cache_spec).__name__ == "FullAttentionSpec")
                     if hybrid else config.kv_cache_groups[0].kv_cache_spec)

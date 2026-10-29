@@ -71,3 +71,14 @@ def test_active_state_bridge_preserves_other_rows_and_padding(state_key, index_k
     expected[5, :12] += 10
     expected[2, :12] += 20
     assert torch.equal(backing, expected)
+
+
+@pytest.mark.parametrize('model_type', [None, 'mamba', 'qwen3_5_text'])
+def test_hybrid_model_scope_is_explicit(model_type):
+    from kvcached.integration.vllm.ascend_hybrid import validate_hybrid_model
+    config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type))
+    if model_type == 'qwen3_5_text':
+        validate_hybrid_model(config)
+    else:
+        with pytest.raises(KVCachedConfigError):
+            validate_hybrid_model(config)
