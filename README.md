@@ -60,6 +60,8 @@ GPT-OSS support in SGLang updated to **v0.5.9**.
 The experimental Ascend backend has a separate, narrower
 [implementation and validation contract](docs/ascend.md). The engine/model
 matrix below does not imply equivalent NPU coverage.
+See the [Ascend checkpoint](docs/ascend-status.md) for completed evidence and
+remaining gaps, and the [probe guide](tests/ascend/README.md) for test entry points.
 
 | Engine | Versions | Attention types | Example models |
 |--------|----------|-----------------|----------------|

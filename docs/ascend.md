@@ -6,11 +6,17 @@ inference, and two-engine reclamation have been tested on Ascend950DT. Do not in
 support for other Ascend devices, engine versions, or execution modes from a
 successful build.
 
+For the consolidated evidence boundary and next acceptance gates, see the
+[2026-10-29 checkpoint](ascend-status.md). Test entry points are listed in the
+[Ascend probe guide](../tests/ascend/README.md).
+
 ## Ownership and integration
 
-- vLLM continues to own requests, logical KV blocks, block tables, and prefix
-  cache validity. The Ascend attention implementation consumes separate K/V
-  tensor views in its existing layout.
+- vLLM's request and block-table semantics are preserved. The integration hooks
+  block allocation, reference changes and prefix eviction through
+  `ElasticBlockPool`, so physical reclamation follows the engine's cache
+  validity and execution lifetime. The Ascend attention implementation consumes
+  separate K/V tensor views in its existing layout.
 - kvcached owns the physical backing of its KV tensors. AscendCL reserves
   virtual addresses separately from physical HBM allocation. Mapping and
   unmapping pages change physical occupancy without moving the tensor base.
