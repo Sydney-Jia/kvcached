@@ -9,6 +9,7 @@ path. Prefix retention, graphs, connectors and asynchronous scheduling are
 rejected until their ownership contracts have separate acceptance evidence.
 """
 
+import json
 import os
 import time
 from functools import wraps
@@ -109,9 +110,14 @@ class NativeElasticWorker(NPUWorker):
             pool.elastic = False
         elif action != 'status':
             raise ValueError(f"Unknown native KV control action: {action}")
-        return dict(pool.status(), action=action, reclaimed_bytes=reclaimed,
+        result = dict(pool.status(), action=action, reclaimed_bytes=reclaimed,
                     live_requests=len(self.native_live_blocks.requests),
                     live_blocks=len(self.native_live_blocks.live_blocks()),
                     base_addresses=[t.data_ptr() for t in pool.raw.values()],
                     device=str(self.device), rank=self.rank, pid=os.getpid(),
+                    dp_rank=self.vllm_config.parallel_config.data_parallel_rank,
                     elapsed_ms=(time.monotonic() - started) * 1000)
+        # vLLM's DP load-balancer fans utility RPCs out to every engine but
+        # returns only the first engine's results. Retain all ranks' evidence.
+        print('KVCACHED_NATIVE_CONTROL ' + json.dumps(result), flush=True)
+        return result
