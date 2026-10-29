@@ -57,6 +57,55 @@ def test_single_device_explicit_budget_is_accepted():
     validate_ascend_config(config())
 
 
+@pytest.mark.parametrize("enabled,queued,asynchronous,expected", [
+    (True, False, False, ["apply", "reclaim", "execute"]),
+    (False, False, False, ["execute"]),
+    (True, True, False, ["execute"]),
+    (True, False, True, ["execute"]),
+])
+def test_live_control_without_new_allocation(monkeypatch, enabled, queued, asynchronous, expected):
+    from kvcached.integration.vllm.ascend import NPUEngineCorePatch
+
+    calls = []
+
+    class Core:
+        batch_queue = [] if queued else None
+        async_scheduling = asynchronous
+        _kvcached_control_managers = [SimpleNamespace(
+            apply_resize_target=lambda: calls.append("apply"),
+            reclaim_for_shrink=lambda: calls.append("reclaim"),
+        )]
+
+        def step(self):
+            calls.append("execute")
+            return "output"
+
+    monkeypatch.setenv("ENABLE_KVCACHED", str(enabled).lower())
+    patch = NPUEngineCorePatch()
+    assert patch.apply(SimpleNamespace(EngineCore=Core))
+    assert patch.apply(SimpleNamespace(EngineCore=Core))
+    assert Core().step() == "output"
+    assert calls == expected
+
+
+def test_failed_live_control_does_not_submit_next_batch(monkeypatch):
+    from kvcached.integration.vllm.ascend import NPUEngineCorePatch
+
+    def failed():
+        raise RuntimeError("mapping failure")
+
+    class Core:
+        _kvcached_control_managers = [SimpleNamespace(apply_resize_target=failed)]
+
+        def step(self):
+            pytest.fail("must not execute after a failed memory operation")
+
+    monkeypatch.setenv("ENABLE_KVCACHED", "true")
+    assert NPUEngineCorePatch().apply(SimpleNamespace(EngineCore=Core))
+    with pytest.raises(RuntimeError, match="mapping failure"):
+        Core().step()
+
+
 @pytest.mark.parametrize("mode,eager,enabled,raises", [
     ("native", False, False, False),
     ("causal-window", False, False, True),
@@ -133,9 +182,10 @@ def test_ascend_classes_are_patched_only_after_native_import(monkeypatch):
     monkeypatch.setattr(ascend, "is_integration_version_supported", lambda *_: True)
     monkeypatch.setattr(ascend, "NPUModelRunnerPatch", lambda: FakePatch("test.runner"))
     monkeypatch.setattr(ascend, "NPUWorkerPatch", lambda: FakePatch("test.worker"))
+    monkeypatch.setattr(ascend, "NPUEngineCorePatch", lambda: FakePatch("test.core"))
     ascend.register_ascend_patches()
     assert applied == []
-    assert set(callbacks) == {"test.runner", "test.worker"}
+    assert set(callbacks) == {"test.runner", "test.worker", "test.core"}
     module = SimpleNamespace()
     callbacks["test.worker"](module)
     assert applied == [module]

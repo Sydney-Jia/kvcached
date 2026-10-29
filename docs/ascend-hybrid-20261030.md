@@ -74,3 +74,21 @@ size difference rather than silently treating layouts as identical.
 The surrounding experiment workspace retains fixed-commit releases, complete
 outputs, commands, driver samples, failure logs and process supervision. The
 comparison report records which candidate and protocol passed each gate.
+
+## Native admission headroom is a separate constraint
+
+The tested Ascend snapshot's `AscendMambaManager.get_num_blocks_to_allocate`
+adds one block whenever computed tokens exceed local prefix hits and new tokens
+are scheduled. With an ordinary running decode and no prefix hits, that condition
+also holds without an external KV connector. All three state groups therefore
+report one extra block even while their live state still occupies the same rows.
+
+An isolated quota staircase retained the same submitted request: prefill emitted
+one token with 640 MiB physically backed, but decode reported three required blocks
+against only one/two available at 768/896 MiB quotas. The next token arrived after
+the quota reached 1024 MiB. This protocol preserves native admission behavior and
+records that calibrated quota explicitly; it does not silently patch the native
+estimator or mistake this waiting condition for a VMM failure. The conservative
+estimator can also limit useful progress under real device-wide pressure. Correct
+handling of local versus external computed state belongs in a separately tested
+native framework fix.

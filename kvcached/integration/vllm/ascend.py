@@ -12,7 +12,7 @@ from functools import wraps
 from importlib.util import find_spec
 from pathlib import Path
 
-from kvcached.integration.patch_base import enable_kvcached, is_integration_version_supported
+from kvcached.integration.patch_base import BasePatch, enable_kvcached, is_integration_version_supported
 from kvcached.integration.vllm.patches import (
     GPUModelRunnerPatch,
     GPUWorkerPatch,
@@ -31,7 +31,7 @@ def register_ascend_patches():
 
     if not is_integration_version_supported("vllm", ">=0.23.0,<0.31.0"):
         raise KVCachedConfigError("Unsupported vLLM version for Ascend elastic KV")
-    for patch in (NPUModelRunnerPatch(), NPUWorkerPatch()):
+    for patch in (NPUModelRunnerPatch(), NPUWorkerPatch(), NPUEngineCorePatch()):
         def apply_after_import(module, patch=patch):
             if not patch.apply(module):
                 raise KVCachedConfigError(f"Could not apply Ascend patch {patch.patch_name}")
@@ -67,6 +67,42 @@ def validate_ascend_config(config):
             "Set --kv-cache-memory-bytes to the desired virtual KV capacity; "
             "physical usage will grow with live KV pages"
         )
+
+
+class NPUEngineCorePatch(BasePatch):
+    """Apply controls between synchronous batches even without a new KV block.
+
+    Large hybrid blocks can cover an entire request. The generic idle watcher
+    and allocation hooks alone then delay a live shrink until that request ends.
+    The synchronous step has completed its previous future/output processing;
+    the allocator's native unmap synchronization remains the device fence.
+    Queued/async execution keeps its separate existing lifetime protocol.
+    """
+    library = "vllm"
+    target_module = "vllm.v1.engine.core"
+    target_class = "EngineCore"
+    patch_name = "ascend_sync_control"
+
+    def apply(self, module):
+        core = self._get_target_class(module)
+        if core is None or not callable(getattr(core, "step", None)):
+            return False
+        original = core.step
+        if self._is_already_patched(original, self.patch_name):
+            return True
+
+        @wraps(original)
+        def step(instance, *args, **kwargs):
+            if (enable_kvcached() and getattr(instance, "batch_queue", None) is None
+                    and not getattr(instance, "async_scheduling", False)):
+                for manager in getattr(instance, "_kvcached_control_managers", ()):
+                    manager.apply_resize_target()
+                    manager.reclaim_for_shrink()
+            return original(instance, *args, **kwargs)
+
+        self._mark_as_patched(step, self.patch_name)
+        core.step = step
+        return True
 
 
 class NPUModelRunnerPatch(GPUModelRunnerPatch):
