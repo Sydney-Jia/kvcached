@@ -26,6 +26,15 @@ probe must check FP8 view format, pointer identity, live data preservation and
 the physical free-memory delta; a successful generic tensor operation alone is
 insufficient to validate native attention compatibility.
 
+The Ascend budget key combines chip UUID with the runtime-resolved physical
+device ID. On the tested A5, devices0/1 share one UUID and devices2/3 another;
+UUID alone incorrectly merges independent memory budgets. A visibility-remapped
+process must still resolve the same physical key. Processes also need the same
+physical-growth lock directory in a shared IPC/filesystem namespace to obtain
+coordinated admission; separate container `/dev/shm` directories do not provide
+a common budget ledger. Mixed old/new key formats must not be treated as one
+coordinated admission domain.
+
 The worker retains all request-owned blocks, including unscheduled requests,
 and transient zero/copy endpoints. A block interval pins every intersecting
 2 MiB physical page. Block zero is always pinned. The union across cache groups

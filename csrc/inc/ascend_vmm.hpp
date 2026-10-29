@@ -49,8 +49,9 @@ inline int current_device() {
   return device;
 }
 
-// The legacy interface name denotes a physical-device identity. Ascend UUIDs
-// remain stable when different processes use different visible-device indices.
+// UUIDs can identify a chip package shared by multiple independently budgeted
+// A5 devices. Include the runtime-resolved physical device ID, not the visible
+// index, so visibility remapping preserves identity without merging HBM pools.
 inline status_t device_get_pci_bus_id(char *identifier, int length,
                                       int device) {
   if (length < 40)
@@ -59,10 +60,23 @@ inline status_t device_get_pci_bus_id(char *identifier, int length,
   const auto status = aclrtDeviceGetUuid(device, &uuid);
   if (!is_success(status))
     return status;
+  int32_t physical_device = -1;
+  const auto physical_status =
+      aclrtGetPhyDevIdByLogicDevId(device, &physical_device);
+  if (!is_success(physical_status))
+    return physical_status;
+  if (physical_device < 0)
+    return ACL_ERROR_INVALID_PARAM;
   std::snprintf(identifier, length, "ascend-");
   for (size_t i = 0; i < sizeof(uuid.bytes); ++i)
     std::snprintf(identifier + 7 + 2 * i, length - 7 - 2 * i, "%02x",
                   static_cast<unsigned char>(uuid.bytes[i]));
+  const auto prefix_length = 7 + 2 * sizeof(uuid.bytes);
+  const auto suffix_length = std::snprintf(identifier + prefix_length,
+      length - prefix_length, "-p%d", physical_device);
+  if (suffix_length < 0 ||
+      static_cast<size_t>(suffix_length) >= length - prefix_length)
+    return ACL_ERROR_INVALID_PARAM;
   return ACL_SUCCESS;
 }
 

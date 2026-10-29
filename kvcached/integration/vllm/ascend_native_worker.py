@@ -104,6 +104,8 @@ class NativeElasticWorker(NPUWorker):
         return super().execute_model(scheduler_output)
 
     def kvcached_native_control(self, action='status'):
+        from kvcached import vmm_ops
+
         pool = self.native_kv_pool
         if pool is None:
             raise RuntimeError("Native elastic pool is not initialized")
@@ -120,6 +122,8 @@ class NativeElasticWorker(NPUWorker):
         elif action != 'status':
             raise ValueError(f"Unknown native KV control action: {action}")
         result = dict(pool.status(), action=action, reclaimed_bytes=reclaimed,
+                    physical_device=vmm_ops.current_device_pci_bus_id(),
+                    physical_budget=dict(vmm_ops.physical_budget_state()),
                     live_requests=len(self.native_live_blocks.requests),
                     live_blocks=len(self.native_live_blocks.live_blocks()),
                     base_addresses=[t.data_ptr() for t in pool.raw.values()],
