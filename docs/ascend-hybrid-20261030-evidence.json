@@ -1,0 +1,551 @@
+{
+  "scope": "single-device eager synchronous text, no prefix/speculation; fixed snapshot",
+  "cases": {
+    "camem27held": {
+      "run": "closure-20261030-011154-d7",
+      "protocol_status": "passed",
+      "error": null,
+      "scenario": "pressure",
+      "kind": "camem",
+      "arm": "held",
+      "clean_measurement": true,
+      "remaining_owned": [],
+      "a_matches": true,
+      "b_matches": true,
+      "b_completed": 4,
+      "a": {
+        "tokens": 128,
+        "complete_s": 11.64621883,
+        "ttft_ms": 183.99554,
+        "max_gap_ms": 104.50548
+      },
+      "b": [
+        {
+          "tokens": 128,
+          "complete_s": 13.78055538,
+          "ttft_ms": 333.3281,
+          "max_gap_ms": 135.32312
+        },
+        {
+          "tokens": 128,
+          "complete_s": 27.30426885,
+          "ttft_ms": 14153.42443,
+          "max_gap_ms": 153.69922
+        },
+        {
+          "tokens": 128,
+          "complete_s": 40.99323121,
+          "ttft_ms": 27612.56338,
+          "max_gap_ms": 209.87258
+        },
+        {
+          "tokens": 128,
+          "complete_s": 52.8234981,
+          "ttft_ms": 41319.82453,
+          "max_gap_ms": 107.48604
+        }
+      ],
+      "pressure_errors": {},
+      "before_a_mib": 4098.0,
+      "after_a_mib": 4098.0,
+      "before_b_mib": 608.0,
+      "b_peak_mib": 608.0,
+      "b_max_running": 1.0,
+      "b_max_denials": 381,
+      "ballast_free_mib": 284.0859375
+    },
+    "camem27reclaim": {
+      "run": "closure-20261030-011941-d7",
+      "protocol_status": "passed",
+      "error": null,
+      "scenario": "pressure",
+      "kind": "camem",
+      "arm": "reclaim",
+      "clean_measurement": true,
+      "remaining_owned": [],
+      "a_matches": true,
+      "b_matches": true,
+      "b_completed": 4,
+      "a": {
+        "tokens": 128,
+        "complete_s": 12.95517653,
+        "ttft_ms": 191.09949,
+        "max_gap_ms": 638.80141
+      },
+      "b": [
+        {
+          "tokens": 128,
+          "complete_s": 15.2710042,
+          "ttft_ms": 316.62718,
+          "max_gap_ms": 303.2055
+        },
+        {
+          "tokens": 128,
+          "complete_s": 15.47621719,
+          "ttft_ms": 910.16979,
+          "max_gap_ms": 291.1649
+        },
+        {
+          "tokens": 128,
+          "complete_s": 15.57545713,
+          "ttft_ms": 1199.87596,
+          "max_gap_ms": 200.07299
+        },
+        {
+          "tokens": 128,
+          "complete_s": 15.66395033,
+          "ttft_ms": 1399.08766,
+          "max_gap_ms": 150.7329
+        }
+      ],
+      "pressure_errors": {},
+      "before_a_mib": 4098.0,
+      "after_a_mib": 608.0,
+      "before_b_mib": 608.0,
+      "b_peak_mib": 2144.0,
+      "b_max_running": 4.0,
+      "b_max_denials": 0,
+      "ballast_free_mib": 284.14453125
+    },
+    "camem27closure": {
+      "run": "closure-20261030-010202-d7",
+      "protocol_status": "passed",
+      "error": null,
+      "scenario": "closure",
+      "kind": "camem",
+      "arm": "reclaim",
+      "clean_measurement": true,
+      "remaining_owned": [],
+      "demand": {
+        "running_b": 4.0,
+        "a_still_generating": true,
+        "a_before_mib": 4098.0,
+        "a_after_mib": 608.0,
+        "b_before_mib": 608.0,
+        "b_after_mib": 2144.0,
+        "a_restore_mib": 4098.0,
+        "a": {
+          "tokens": 128,
+          "complete_s": 14.14106799,
+          "ttft_ms": 239.80604,
+          "max_gap_ms": 829.57449
+        },
+        "b": [
+          {
+            "tokens": 128,
+            "complete_s": 17.5601345,
+            "ttft_ms": 402.24439,
+            "max_gap_ms": 521.7636
+          },
+          {
+            "tokens": 128,
+            "complete_s": 17.82981451,
+            "ttft_ms": 1359.37903,
+            "max_gap_ms": 418.77912
+          },
+          {
+            "tokens": 128,
+            "complete_s": 17.95290593,
+            "ttft_ms": 1742.92641,
+            "max_gap_ms": 427.06766
+          },
+          {
+            "tokens": 128,
+            "complete_s": 18.05779275,
+            "ttft_ms": 2160.36237,
+            "max_gap_ms": 193.19306
+          }
+        ],
+        "ack_ms": 839.61093,
+        "driver_return_mib": 3490.0
+      },
+      "mixed_recycles": [
+        true,
+        true
+      ]
+    },
+    "kc27closure": {
+      "run": "closure-20261030-030934-d6",
+      "protocol_status": "passed",
+      "error": null,
+      "scenario": "closure",
+      "kind": "kvcached",
+      "arm": "reclaim",
+      "clean_measurement": true,
+      "remaining_owned": [],
+      "demand": {
+        "running_b": 4.0,
+        "a_still_generating": true,
+        "a_before_mib": 1152.0,
+        "a_after_mib": 640.0,
+        "b_before_mib": 640.0,
+        "b_after_mib": 2176.0,
+        "a_restore_mib": 1152.0,
+        "a": {
+          "tokens": 128,
+          "complete_s": 34.22046076,
+          "ttft_ms": 202.5994,
+          "max_gap_ms": 319.12986
+        },
+        "b": [
+          {
+            "tokens": 128,
+            "complete_s": 36.46271062,
+            "ttft_ms": 415.65536,
+            "max_gap_ms": 714.51069
+          },
+          {
+            "tokens": 128,
+            "complete_s": 36.81526501,
+            "ttft_ms": 1837.86991,
+            "max_gap_ms": 699.21857
+          },
+          {
+            "tokens": 128,
+            "complete_s": 37.02646627,
+            "ttft_ms": 2536.37214,
+            "max_gap_ms": 547.09382
+          },
+          {
+            "tokens": 128,
+            "complete_s": 37.23113373,
+            "ttft_ms": 3082.04746,
+            "max_gap_ms": 342.34304
+          }
+        ],
+        "ack_ms": 210.49674,
+        "driver_return_mib": 512.0
+      },
+      "mixed_recycles": [
+        true,
+        true
+      ]
+    },
+    "kc27reclaim": {
+      "run": "closure-20261030-025843-d6",
+      "protocol_status": "passed",
+      "error": null,
+      "scenario": "pressure",
+      "kind": "kvcached",
+      "arm": "reclaim",
+      "clean_measurement": true,
+      "remaining_owned": [],
+      "a_matches": true,
+      "b_matches": true,
+      "b_completed": 4,
+      "a": {
+        "tokens": 128,
+        "complete_s": 34.60717375,
+        "ttft_ms": 238.0634,
+        "max_gap_ms": 318.54903
+      },
+      "b": [
+        {
+          "tokens": 128,
+          "complete_s": 35.58030316,
+          "ttft_ms": 429.35303,
+          "max_gap_ms": 701.37069
+        },
+        {
+          "tokens": 128,
+          "complete_s": 36.36212306,
+          "ttft_ms": 1657.93105,
+          "max_gap_ms": 405.18455
+        },
+        {
+          "tokens": 128,
+          "complete_s": 58.52151115,
+          "ttft_ms": 36362.91934,
+          "max_gap_ms": 383.39075
+        },
+        {
+          "tokens": 128,
+          "complete_s": 58.86063804,
+          "ttft_ms": 37109.74575,
+          "max_gap_ms": 196.10447
+        }
+      ],
+      "pressure_errors": {},
+      "before_a_mib": 1152.0,
+      "after_a_mib": 640.0,
+      "before_b_mib": 640.0,
+      "b_peak_mib": 1152.0,
+      "b_max_running": 2.0,
+      "b_max_denials": 0,
+      "ballast_free_mib": 262.80078125
+    },
+    "kc27held": {
+      "run": "closure-20261030-030413-d6",
+      "protocol_status": "passed",
+      "error": null,
+      "scenario": "pressure",
+      "kind": "kvcached",
+      "arm": "held",
+      "clean_measurement": true,
+      "remaining_owned": [],
+      "a_matches": true,
+      "b_matches": true,
+      "b_completed": 4,
+      "a": {
+        "tokens": 128,
+        "complete_s": 35.26714787,
+        "ttft_ms": 223.68523,
+        "max_gap_ms": 325.11571
+      },
+      "b": [
+        {
+          "tokens": 128,
+          "complete_s": 35.28387019,
+          "ttft_ms": 423.907,
+          "max_gap_ms": 320.35947
+        },
+        {
+          "tokens": 128,
+          "complete_s": 56.85763113,
+          "ttft_ms": 35501.51001,
+          "max_gap_ms": 173.40741
+        },
+        {
+          "tokens": 128,
+          "complete_s": 78.41039052,
+          "ttft_ms": 57080.67573,
+          "max_gap_ms": 175.90345
+        },
+        {
+          "tokens": 128,
+          "complete_s": 99.98166061,
+          "ttft_ms": 78641.91472,
+          "max_gap_ms": 176.78028
+        }
+      ],
+      "pressure_errors": {},
+      "before_a_mib": 1152.0,
+      "after_a_mib": 1152.0,
+      "before_b_mib": 640.0,
+      "b_peak_mib": 640.0,
+      "b_max_running": 1.0,
+      "b_max_denials": 0,
+      "ballast_free_mib": 266.42578125
+    },
+    "kc06closure": {
+      "run": "closure-20261030-031510-d6",
+      "protocol_status": "passed",
+      "error": null,
+      "scenario": "closure",
+      "kind": "kvcached",
+      "arm": "reclaim",
+      "clean_measurement": true,
+      "remaining_owned": [],
+      "demand": {
+        "running_b": 4.0,
+        "a_still_generating": true,
+        "a_before_mib": 784.0,
+        "a_after_mib": 224.0,
+        "b_before_mib": 224.0,
+        "b_after_mib": 560.0,
+        "a_restore_mib": 784.0,
+        "a": {
+          "tokens": 512,
+          "complete_s": 13.83639763,
+          "ttft_ms": 75.04095,
+          "max_gap_ms": 171.11171
+        },
+        "b": [
+          {
+            "tokens": 512,
+            "complete_s": 15.72169404,
+            "ttft_ms": 80.02897,
+            "max_gap_ms": 72.61349
+          },
+          {
+            "tokens": 512,
+            "complete_s": 15.81066523,
+            "ttft_ms": 217.18465,
+            "max_gap_ms": 72.49336
+          },
+          {
+            "tokens": 512,
+            "complete_s": 15.87109879,
+            "ttft_ms": 316.72189,
+            "max_gap_ms": 74.54822
+          },
+          {
+            "tokens": 512,
+            "complete_s": 15.9218978,
+            "ttft_ms": 446.47695,
+            "max_gap_ms": 67.14915
+          }
+        ],
+        "ack_ms": 271.35242,
+        "driver_return_mib": 560.0
+      },
+      "mixed_recycles": []
+    }
+  },
+  "native_reference_audit": {
+    "status": "passed",
+    "native_run": "closure-20261030-032052-d6",
+    "candidate_run": "closure-20261030-031510-d6",
+    "checks": [
+      "complete single-request references equal",
+      "complete four-request batch reference equal",
+      "donor output equal",
+      "borrower outputs equal",
+      "restored donor output equal",
+      "no foreign process observed during fresh native run",
+      "all owned processes exited"
+    ],
+    "original_reference": "/home/j00959208/kvcached-ascend/camem-elastic/results/closure-20261030-002556-d7.json",
+    "preflight_noop_records": [
+      {
+        "pid": 2710105,
+        "action": "identity_changed_or_gone"
+      }
+    ],
+    "scope": "Fresh correctness reference; native latency is not a co-serving performance baseline.",
+    "files": {
+      "closure-20261030-032052-d6.json": "636d502f4603937ef59993bcd83c2848ae9ca5c015dd65388471137fb7843074",
+      "closure-20261030-032052-d6.supervisor.json": "53c0851e967ab15202c1c67b3e128acd2f264c5f136d96ec5f961cbad4f83568",
+      "closure-20261030-031510-d6.json": "356c4222a15f30910c2c71abd5835f12b2d7c21325dc58aa214ef8213ecb2d37",
+      "closure-20261030-031510-d6.supervisor.json": "b10fc55c9c1dc5fe6defa9a4bfdbda8faa1b0364f7fccff5c3a8ec2eaec0a894"
+    }
+  },
+  "files": {
+    "closure-20261030-011154-d7.json": "bdc07393d40369d678c773a88067e4b562c49fba5c1a21be92c3c95f62560467",
+    "closure-20261030-011154-d7.supervisor.json": "e2d0a9682b93a5c2350e86c48e20ebeee45aed2870d4110f9d3d601b23bda4f6",
+    "closure-20261030-011941-d7.json": "bc49a67ef7292b0ea1c87aeace192c4a09becb547050831fdfa69ceaaa8b6c40",
+    "closure-20261030-011941-d7.supervisor.json": "c249fc17af4d19cf22ad0adeab21ace01ecab32fb44651e28e8642e531b9f69a",
+    "closure-20261030-010202-d7.json": "4cad6b752f43f42c308b84add186d19355df0fc84f07debfecede064810195fb",
+    "closure-20261030-010202-d7.supervisor.json": "4e256b30674cb0dbbb398f8046e1d88e995af944377759d7700b042642fd1085",
+    "closure-20261030-030934-d6.json": "004d61eccf2d67b98f2e65025f219c2b0e1da989a1d5a4dbcb8e4799da87757f",
+    "closure-20261030-030934-d6.supervisor.json": "810a0b3b6e44cd70cc4e302f96de8c4c22e071d551637a2f019e257f1e423ef5",
+    "closure-20261030-025843-d6.json": "03dbe8438c6f79c0bdefeb038fa77ffe380ef28685b4fcb3cd27bc127703a0b6",
+    "closure-20261030-025843-d6.supervisor.json": "db002be768e899dd79ea100530674785e16ad2900837152b63e16caf2b8cb346",
+    "closure-20261030-030413-d6.json": "8195dcb24ccc29d55c000e20cf14adde7c7b14112e3def53647bc53e10b5bef0",
+    "closure-20261030-030413-d6.supervisor.json": "13be7bb200fa852b6d53b25d3bef962d0bd76103075ea770ca75a51809d25455",
+    "closure-20261030-031510-d6.json": "356c4222a15f30910c2c71abd5835f12b2d7c21325dc58aa214ef8213ecb2d37",
+    "closure-20261030-031510-d6.supervisor.json": "b10fc55c9c1dc5fe6defa9a4bfdbda8faa1b0364f7fccff5c3a8ec2eaec0a894"
+  },
+  "versions": {
+    "camem_runtime": "00624d75390eff730f4811bdc1514fd806f2fe2b",
+    "kvcached_native_extension": "1e919a07f0621678ae4141d28efdb52ed7fd3c8b",
+    "kvcached_candidate": "04820ba2f3fad510065373ded50e1fad751d47f9",
+    "acceptance_protocol": "ccd68dd13c17ecc15b06bcc2f2d72fdb23eed525",
+    "vllm": "custom 0.23.0 / Ascend a218b5b snapshot",
+    "torch_and_torch_npu": "2.10",
+    "CANN": "9.1",
+    "device": "Ascend 950DT"
+  },
+  "cpu_checks": {
+    "kvcached": 98,
+    "camem": 13
+  },
+  "configuration": {
+    "camem27held": {
+      "kv_bytes": 4294967296,
+      "input_tokens": 512,
+      "output_tokens": 128,
+      "block_size": null,
+      "native_default_block_size": null,
+      "kc_trim_mib": null,
+      "kc_gpu_utilization": null,
+      "camem_safety_mib": 94,
+      "free_mib": 256,
+      "pressure_arm": "held",
+      "scenario": "pressure",
+      "model_directory_label": "Qwen3.8-27B-w8a8-mxfp8-20261029"
+    },
+    "camem27reclaim": {
+      "kv_bytes": 4294967296,
+      "input_tokens": 512,
+      "output_tokens": 128,
+      "block_size": null,
+      "native_default_block_size": null,
+      "kc_trim_mib": null,
+      "kc_gpu_utilization": null,
+      "camem_safety_mib": 94,
+      "free_mib": 256,
+      "pressure_arm": "reclaim",
+      "scenario": "pressure",
+      "model_directory_label": "Qwen3.8-27B-w8a8-mxfp8-20261029"
+    },
+    "camem27closure": {
+      "kv_bytes": 4294967296,
+      "input_tokens": 512,
+      "output_tokens": 128,
+      "block_size": null,
+      "native_default_block_size": null,
+      "kc_trim_mib": null,
+      "kc_gpu_utilization": null,
+      "camem_safety_mib": 94,
+      "free_mib": 256,
+      "pressure_arm": "reclaim",
+      "scenario": "closure",
+      "model_directory_label": "Qwen3.8-27B-w8a8-mxfp8-20261029"
+    },
+    "kc27closure": {
+      "kv_bytes": 4294967296,
+      "input_tokens": 512,
+      "output_tokens": 128,
+      "block_size": 2048,
+      "native_default_block_size": true,
+      "kc_trim_mib": 1024,
+      "kc_gpu_utilization": 0.999,
+      "camem_safety_mib": 94,
+      "free_mib": 256,
+      "pressure_arm": "reclaim",
+      "scenario": "closure",
+      "model_directory_label": "Qwen3.8-27B-w8a8-mxfp8-20261029"
+    },
+    "kc27reclaim": {
+      "kv_bytes": 4294967296,
+      "input_tokens": 512,
+      "output_tokens": 128,
+      "block_size": 2048,
+      "native_default_block_size": true,
+      "kc_trim_mib": 1024,
+      "kc_gpu_utilization": 0.999,
+      "camem_safety_mib": 94,
+      "free_mib": 256,
+      "pressure_arm": "reclaim",
+      "scenario": "pressure",
+      "model_directory_label": "Qwen3.8-27B-w8a8-mxfp8-20261029"
+    },
+    "kc27held": {
+      "kv_bytes": 4294967296,
+      "input_tokens": 512,
+      "output_tokens": 128,
+      "block_size": 2048,
+      "native_default_block_size": true,
+      "kc_trim_mib": 1024,
+      "kc_gpu_utilization": 0.999,
+      "camem_safety_mib": 94,
+      "free_mib": 256,
+      "pressure_arm": "held",
+      "scenario": "pressure",
+      "model_directory_label": "Qwen3.8-27B-w8a8-mxfp8-20261029"
+    },
+    "kc06closure": {
+      "kv_bytes": 1073741824,
+      "input_tokens": 1024,
+      "output_tokens": 512,
+      "block_size": null,
+      "native_default_block_size": false,
+      "kc_trim_mib": null,
+      "kc_gpu_utilization": 0.999,
+      "camem_safety_mib": 94,
+      "free_mib": 256,
+      "pressure_arm": "reclaim",
+      "scenario": "closure",
+      "model_directory_label": "Qwen3-0.6B-c1899de"
+    }
+  },
+  "limits": [
+    "Synthetic fixed token inputs; output equality is not a general quality evaluation.",
+    "Do not treat held-arm harness completion as request correctness.",
+    "Routes have different layout and initial backing; not a cross-route throughput ranking.",
+    "No TP/DP, graph, asynchronous, speculative, multimodal or hybrid-prefix acceptance.",
+    "CaMem initially backs full KV; kvcached hybrid bridge copies active state.",
+    "Original installed wheel and native runtime snapshots were preserved."
+  ]
+}

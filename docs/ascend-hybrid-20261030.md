@@ -86,12 +86,22 @@ report one extra block even while their live state still occupies the same rows.
 An isolated quota staircase retained the same submitted request: prefill emitted
 one token with 640 MiB physically backed, but decode reported three required blocks
 against only one/two available at 768/896 MiB quotas. The next token arrived after
-the quota reached 1024 MiB. This protocol preserves native admission behavior and
-records that calibrated quota explicitly; it does not silently patch the native
-estimator or mistake this waiting condition for a VMM failure. The conservative
-estimator can also limit useful progress under real device-wide pressure. Correct
-handling of local versus external computed state belongs in a separately tested
-native framework fix.
+the quota reached 1024 MiB. That diagnostic preserved native admission behavior;
+the protocol records the calibrated quota explicitly.
+
+Real pressure then exposed the availability consequence: the borrower completed
+all four requests correctly, but the donor timed out because the predictor
+required extra capacity for already backed local decode. That run failed joint
+acceptance; useful borrower progress alone was not counted as success.
+
+The bounded candidate now binds the original base `MambaManager` predictor to
+the inspected `AscendMambaManager` instances when hybrid mode is explicitly
+enabled and KV connectors are absent. This removes only the external-load
+addition, preserves actual new-block prediction/allocation/free behavior, and
+does not mutate the manager class used by native or unrelated instances.
+External connectors are rejected. A general native-framework fix should use
+actual external-token provenance rather than computed-token count; it needs its
+own connector tests and review. Hybrid asynchronous scheduling is also rejected.
 
 ## Apply live controls even when no new KV block is needed
 
@@ -110,3 +120,33 @@ be submitted. The generic idle watcher remains necessary when no step runs.
 CPU checks cover operation ordering, disablement, queued/async exclusions,
 idempotent installation and fail-closed behavior. Hardware acceptance must again
 prove that the donor remains active when the borrower obtains added capacity.
+
+## Completed bounded acceptance (2026-10-30)
+
+Final Python candidate `04820ba` uses the native extension built at `1e919a0`;
+the extension/build sources were checked unchanged. All final cases used the
+same fixed candidate. The original wheel and native runtime were preserved.
+
+With two independent 27B engines and about 256 MiB of real device memory left,
+B ran four requests serially in 99.98 s while A retained its KV backing.
+Reclaiming 512 MiB from A let B grow from 640 to 1152 MiB, run two requests
+concurrently, and finish all four in 58.86 s. Both engines' complete outputs
+matched the native reference in both arms. A completed in 35.27/34.61 s;
+its maximum observed HTTP output gap was 325/319 ms (held/reclaimed).
+These are fixed-load samples, not SLO distributions.
+
+The separate ample-memory closure passed donor-live borrowing, restoration,
+and two mixed-input replay rounds. The same final candidate passed the 0.6B
+ordinary-attention closure. The native extension passed four NPU page-lifetime
+checks; 98 related CPU tests passed. No foreign NPU process was detected in
+the accepted measurement windows and all experiment-owned processes exited.
+
+See [the compact evidence ledger](ascend-hybrid-20261030-evidence.json) for exact
+run IDs, bounded configuration, latency, hashes and limits. Full token traces
+and supervision logs remain in the experiment workspace. Failed donor-starvation
+and delayed-control runs remain evidence, not successful acceptance.
+
+This validates the explicitly guarded single-rank synchronous eager text path.
+It does not establish graph, asynchronous, prefix-cache, speculative, connector,
+multimodal or long-duration production support. The active-state bridge still
+adds copies and needs a better layout/operator contract before broad adoption.
