@@ -13,6 +13,19 @@ the backing allocation with kvcached VMM tensors; native reshape, attention and
 logical block tables remain unchanged. It does not reinterpret these tensors
 as ordinary MHA or MLA caches.
 
+Build this path with `KVCACHED_BUILD_NPU_STORAGE=1`. It adds an optional
+`_npu_storage` extension built for the installed **torch and torch_npu versions**;
+unlike the core VMM extension, this bridge does not promise stable ABI across
+versions. Native ACLNN cache operators inspect NPU storage format metadata.
+Generic stable-ABI `from_blob` provides a pointer and shape but not an
+`NPUStorageImpl` descriptor. The bridge constructs a zero-element native tensor,
+attaches the existing VMM pointer with lifetime ownership, and initializes its
+ND byte-storage descriptor before any native dtype/shape views are created.
+It neither copies the cache nor changes its virtual address. A device acceptance
+probe must check FP8 view format, pointer identity, live data preservation and
+the physical free-memory delta; a successful generic tensor operation alone is
+insufficient to validate native attention compatibility.
+
 The worker retains all request-owned blocks, including unscheduled requests,
 and transient zero/copy endpoints. A block interval pins every intersecting
 2 MiB physical page. Block zero is always pinned. The union across cache groups
