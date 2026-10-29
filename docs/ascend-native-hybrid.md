@@ -67,3 +67,31 @@ held and elastic outputs, real driver memory, live-request transitions,
 recipient use and latency. `tools/ascend_native_launch.py` produces a matched
 configuration from a preserved deployment launcher and external machine
 bindings. Its dev RPC binds localhost; it is not a production serving recipe.
+
+## Acceptance observations (2026-10-30)
+
+On Ascend 950DT with the above versions, short requests passed9/9, held-pool
+long/concurrent cases passed10/10, and live shrink/restore/demand-growth cases
+passed11/11. Each rank's mapped backing went from2,050MiB to8MiB with unchanged
+virtual addresses. Driver-free and Torch allocated/reserved counters were
+recorded separately; unused framework cache trimming was applied to both
+held and elastic conditions. Bulk KV transitions took seconds, not zero time.
+
+A controlled pressure comparison used another Qwen3-0.6B engine on one card
+and a fixed4.125GiB physical allocation. Eight identical requests completed in
+9.59s with held KV versus4.76s after KV reclamation; sampled running concurrency
+rose from3 to8 and recipient peak HBM from2,447MiB to3,679MiB. Both sets of eight
+outputs were correct. The experiment retained the allocator's5% headroom;
+it did not exhaust raw HBM. These are scoped observations, not a general
+throughput guarantee or broad model-quality evaluation.
+
+**Concurrent execution is not accepted as stable.** One full coactive cycle
+passed, but a repeat hit MegaMoE cross-rank barrier timeouts. An independent
+native DeepSeek run without this worker/VMM, without memory pressure or KV
+retirement, reproduced the same barrier failure when running with Qwen. Only
+the two serving processes appeared in that card's samples. This establishes
+that the failure can occur without the DeepSeek KV adaptation; it does not
+identify the exact scheduling/kernel root cause or exclude additional bugs.
+Repair the native co-location baseline before claiming reliable simultaneous
+execution. Independent container IPC namespaces and mixed budget-key versions
+also mean this trial does not validate a common atomic admission ledger.
