@@ -92,3 +92,21 @@ estimator or mistake this waiting condition for a VMM failure. The conservative
 estimator can also limit useful progress under real device-wide pressure. Correct
 handling of local versus external computed state belongs in a separately tested
 native framework fix.
+
+## Apply live controls even when no new KV block is needed
+
+An otherwise correct 128-token donor request completed before the generic
+allocation/idle hooks applied its shrink. The large 2048-token logical block
+required no new KV allocation during decode. Its control acknowledgement took
+16.8 seconds, so that run failed the online-closure gate despite returning real
+memory and producing the correct full output.
+
+The Ascend integration now polls the existing runtime control managers before
+each synchronous `EngineCore.step`. The previous step's future and output
+processing have completed; native allocator synchronization still fences any
+physical unmap. The hook changes no live-block ownership, does not run for
+queued/asynchronous execution, and propagates failures before another batch can
+be submitted. The generic idle watcher remains necessary when no step runs.
+CPU checks cover operation ordering, disablement, queued/async exclusions,
+idempotent installation and fail-closed behavior. Hardware acceptance must again
+prove that the donor remains active when the borrower obtains added capacity.
