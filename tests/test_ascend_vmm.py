@@ -5,6 +5,9 @@
 
 import multiprocessing
 import os
+import json
+import subprocess
+import sys
 import traceback
 
 import pytest
@@ -13,6 +16,36 @@ pytestmark = pytest.mark.skipif(
     os.getenv("KVCACHED_RUN_ASCEND_TESTS") != "1",
     reason="requires an explicitly selected Ascend test device",
 )
+
+
+@pytest.mark.skipif(
+    os.getenv('KVCACHED_RUN_ASCEND_MULTI_DEVICE_TESTS') != '1',
+    reason='requires an explicitly authorized multi-device visibility list',
+)
+def test_physical_keys_are_distinct_and_visibility_stable():
+    visible = os.environ['ASCEND_RT_VISIBLE_DEVICES'].split(',')
+    assert len(visible) >= 2 and all(value.isdigit() for value in visible)
+    script = '''
+import json, torch, torch_npu
+from kvcached import _C
+keys = []
+for device in range(torch.npu.device_count()):
+    torch.npu.set_device(device)
+    keys.append(_C.current_device_pci_bus_id())
+print('PHYSICAL_KEYS=' + json.dumps(keys), flush=True)
+'''
+
+    def query(selection):
+        env = dict(os.environ, ASCEND_RT_VISIBLE_DEVICES=','.join(selection),
+                   PYTHONPATH=os.pathsep.join(sys.path))
+        output = subprocess.check_output([sys.executable, '-c', script], env=env,
+                                         text=True, timeout=120)
+        return json.loads(next(line.split('=', 1)[1] for line in output.splitlines()
+                               if line.startswith('PHYSICAL_KEYS=')))
+
+    keys = query(visible)
+    assert len(keys) == len(visible) and len(set(keys)) == len(keys)
+    assert query([visible[1]]) == [keys[1]]
 
 
 @pytest.fixture
