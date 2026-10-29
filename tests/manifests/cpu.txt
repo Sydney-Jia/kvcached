@@ -1,5 +1,7 @@
 tests/test_alloc_rollback.py
 tests/test_ascend_integration.py
+tests/test_ascend_native_geometry.py
+tests/test_ascend_native_pool.py
 tests/test_ascend_pressure_protocol.py
 tests/test_ascend_pressure_stream.py
 tests/test_ascend_process_identity.py
