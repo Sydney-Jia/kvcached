@@ -120,7 +120,8 @@ def test_fia_option_preflight_and_install_order(monkeypatch, mode, eager, enable
     cfg = config()
     cfg.model_config.enforce_eager = eager
     calls = []
-    native = lambda **kwargs: kwargs
+    def native(**kwargs):
+        return kwargs
     npu = SimpleNamespace(npu_fused_infer_attention_score=native)
     monkeypatch.setitem(sys.modules, "torch_npu", npu)
     monkeypatch.setenv("ENABLE_KVCACHED", str(enabled).lower())
