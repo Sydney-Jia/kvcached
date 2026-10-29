@@ -102,6 +102,19 @@ class NPUEngineCorePatch(BasePatch):
 
         self._mark_as_patched(step, self.patch_name)
         core.step = step
+        original_init = core.__init__
+
+        @wraps(original_init)
+        def initialize(instance, *args, **kwargs):
+            original_init(instance, *args, **kwargs)
+            config = getattr(instance, "vllm_config", None)
+            if (enable_kvcached() and config is not None
+                    and config.additional_config.get("kvcached_ascend_hybrid", False)):
+                from kvcached.integration.vllm.ascend_hybrid import install_local_state_admission
+
+                install_local_state_admission(instance)
+
+        core.__init__ = initialize
         return True
 
 

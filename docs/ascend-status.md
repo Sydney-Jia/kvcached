@@ -5,6 +5,13 @@ not the support matrix of every kvcached backend. Installation and configuration
 remain in [ascend.md](ascend.md); probes are indexed in the
 [Ascend test guide](../tests/ascend/README.md).
 
+The separate `experiment/ascend-hybrid-kv` branch adds the bounded
+[2026-10-30 hybrid candidate](ascend-hybrid-20261030.md): native NPU tensor
+metadata, uniform hybrid cells, active GDN state bridging, and synchronous
+live-control polling. It preserves this installed baseline. Its results and
+additional ABI/copying costs must not be projected onto every model or execution
+mode in the baseline matrix below.
+
 ## Implementation boundary
 
 The implementation adds an AscendCL VMM backend and a vLLM-Ascend adapter for

@@ -8,6 +8,45 @@ from kvcached.integration.vllm.ascend_hybrid import normalize_hybrid_specs
 from kvcached.utils import KVCachedConfigError
 
 
+def test_local_state_admission_keeps_live_state_without_phantom_external_block():
+    from kvcached.integration.vllm.ascend_hybrid import install_local_state_admission
+
+    class MambaManager:
+        def __init__(self):
+            self.held = {"running": [7]}
+
+        def get_num_blocks_to_allocate(self, request_id, num_tokens, **kwargs):
+            return max(0, (num_tokens + 2047) // 2048 - len(self.held.get(request_id, [])))
+
+    class AscendMambaManager(MambaManager):
+        def get_num_blocks_to_allocate(self, request_id, num_tokens, **kwargs):
+            return super().get_num_blocks_to_allocate(request_id, num_tokens) + 1
+
+    AscendMambaManager.__module__ = "vllm_ascend.patch.platform.patch_mamba_manager"
+    local, untouched = AscendMambaManager(), AscendMambaManager()
+    engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(kv_transfer_config=None),
+        scheduler=SimpleNamespace(kv_cache_manager=SimpleNamespace(
+            coordinator=SimpleNamespace(single_type_managers=[local]))),
+    )
+    assert local.get_num_blocks_to_allocate("running", 600) == 1
+    install_local_state_admission(engine)
+    install_local_state_admission(engine)
+    assert local.get_num_blocks_to_allocate("running", 600) == 0
+    assert local.get_num_blocks_to_allocate("new", 600) == 1
+    assert local.get_num_blocks_to_allocate("running", 2100) == 1
+    assert local.held == {"running": [7]}
+    assert untouched.get_num_blocks_to_allocate("running", 600) == 1
+
+
+def test_local_state_admission_rejects_external_connector():
+    from kvcached.integration.vllm.ascend_hybrid import install_local_state_admission
+
+    engine = SimpleNamespace(vllm_config=SimpleNamespace(kv_transfer_config=object()))
+    with pytest.raises(KVCachedConfigError, match="external KV"):
+        install_local_state_admission(engine)
+
+
 def specs():
     Full = make_dataclass(
         "FullAttentionSpec",

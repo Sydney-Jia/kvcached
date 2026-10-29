@@ -11,6 +11,7 @@ No state shape, dtype, token block size or kernel implementation is changed.
 from dataclasses import replace
 from functools import wraps
 from math import prod
+from types import MethodType
 
 from kvcached.utils import KVCachedConfigError
 
@@ -19,6 +20,30 @@ def validate_hybrid_model(model_config):
     text_config = getattr(model_config, "hf_text_config", None)
     if getattr(text_config, "model_type", None) != "qwen3_5_text":
         raise KVCachedConfigError("Ascend hybrid candidate is limited to Qwen3.5 GDN text models")
+
+
+def install_local_state_admission(engine):
+    """Use native local-state accounting without the external-load extra block.
+
+    This bounded candidate rejects KV connectors. The inspected Ascend manager
+    infers an external load from total computed tokens alone; that is also true
+    of ordinary running decode, for which the base MambaManager needs no new
+    block. Physical availability exposes that overestimate as a stall/preemption
+    even when every live state is backed. Keep actual allocation/free semantics.
+    """
+    if getattr(engine.vllm_config, "kv_transfer_config", None) is not None:
+        raise KVCachedConfigError("Local hybrid admission cannot handle external KV loads")
+    coordinator = engine.scheduler.kv_cache_manager.coordinator
+    for manager in coordinator.single_type_managers:
+        cls = type(manager)
+        if cls.__name__ != "AscendMambaManager":
+            continue
+        if cls.__module__ != "vllm_ascend.patch.platform.patch_mamba_manager":
+            raise KVCachedConfigError("Unknown Ascend Mamba admission implementation")
+        parent = cls.__bases__[0]
+        if parent.__name__ != "MambaManager":
+            raise KVCachedConfigError("Unknown local Mamba admission contract")
+        manager.get_num_blocks_to_allocate = MethodType(parent.get_num_blocks_to_allocate, manager)
 
 
 def normalize_hybrid_specs(specs):
