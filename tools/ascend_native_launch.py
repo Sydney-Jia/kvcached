@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--mode', choices=('native', 'elastic'), required=True)
     parser.add_argument('--release', type=Path)
+    parser.add_argument('--serialize-stream-init', action='store_true')
     args = parser.parse_args()
     if args.output_dir.exists():
         parser.error('Use a fresh output directory')
@@ -43,9 +44,14 @@ def main():
     if args.mode == 'elastic':
         assert args.release.is_dir()
         environment['PYTHONPATH'] = str(args.release) + ':' + environment['PYTHONPATH']
-        command.extend(['--worker-cls', 'kvcached.integration.vllm.ascend_native_worker.NativeElasticWorker'])
+        worker = 'kvcached.integration.vllm.ascend_native_worker.NativeElasticWorker'
+        if args.serialize_stream_init:
+            worker = 'kvcached.integration.vllm.ascend_serial_stream_worker.SerialStreamNativeWorker'
+            environment['KVCACHED_NATIVE_STREAM_INIT_LOCK'] = str(args.output_dir / 'stream-init.lock')
+        command.extend(['--worker-cls', worker])
     plan['experiment'] = {'mode': args.mode, 'prefix_caching': False,
                           'speculation': False, 'kv_bytes': 2 * 1024**3,
+                          'serialized_stream_init': args.serialize_stream_init,
                           'kvcached_release': str(args.release) if args.release else None}
     plan['api'] = 'http://127.0.0.1:' + str(plan['local']['roles']['combined']['port'])
     result = check(args.launcher, plan, full_weights=False, allow_shared=False)
