@@ -5,7 +5,6 @@
 // remains in the stable-ABI extension. No device memory is allocated or copied.
 #include <torch/extension.h>
 #include <torch_npu/csrc/core/NPUStorageImpl.h>
-#include <torch_npu/csrc/framework/StorageDescHelper.h>
 
 at::Tensor wrap_nd_storage(const at::Tensor& source) {
   TORCH_CHECK(source.device().type() == c10::DeviceType::PrivateUse1,
@@ -19,15 +18,24 @@ at::Tensor wrap_nd_storage(const at::Tensor& source) {
                     [](void* ptr) { delete static_cast<at::Tensor*>(ptr); },
                     source.device());
   owner.release();
-  auto storage = c10::make_intrusive<torch_npu::NPUStorageImpl>(
-      c10::StorageImpl::use_byte_size_t(), source.nbytes(), std::move(data),
-      nullptr, false);
-  // A zero-element native tensor gives us the backend's normal TensorImpl.
+  // Native empty dispatch constructs the backend's TensorImpl and StorageImpl;
+  // the latter carries format metadata absent from stable-ABI from_blob.
   auto result = at::empty({0}, source.options());
-  result.unsafeGetTensorImpl()->set_storage_keep_dtype(c10::Storage(storage));
+  auto* storage = result.storage().unsafeGetStorageImpl();
+  storage->set_data_ptr(std::move(data));
+  storage->set_nbytes(source.nbytes());
+  storage->set_resizable(false);
   result.unsafeGetTensorImpl()->set_sizes_contiguous(source.sizes());
-  at_npu::native::StorageDescHelper::SetDesc(
-      result, result.sizes(), result.strides(), ACL_FORMAT_ND);
+  // These public header fields are intentionally version-specific. The helper
+  // methods are not exported by torch_npu; no hidden symbols are required.
+  auto& desc = static_cast<torch_npu::NPUStorageImpl*>(storage)->npu_desc_;
+  desc.base_sizes_.assign(result.sizes().begin(), result.sizes().end());
+  desc.base_strides_.assign(result.strides().begin(), result.strides().end());
+  desc.storage_sizes_ = desc.base_sizes_;
+  desc.base_offset_ = 0;
+  desc.origin_format_ = ACL_FORMAT_ND;
+  desc.npu_format_ = ACL_FORMAT_ND;
+  desc.data_type_ = result.dtype();
   TORCH_CHECK(result.data_ptr() == source.data_ptr(), "Storage bridge copied data");
   return result;
 }
