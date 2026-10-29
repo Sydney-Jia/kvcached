@@ -57,6 +57,14 @@ def test_single_device_explicit_budget_is_accepted():
     validate_ascend_config(config())
 
 
+def test_hybrid_async_contract_rejected_before_execution():
+    cfg = config()
+    cfg.additional_config = {"kvcached_ascend_hybrid": True}
+    cfg.scheduler_config = SimpleNamespace(async_scheduling=True)
+    with pytest.raises(KVCachedConfigError, match="synchronous scheduling"):
+        validate_ascend_config(cfg)
+
+
 @pytest.mark.parametrize("enabled,queued,asynchronous,expected", [
     (True, False, False, ["apply", "reclaim", "execute"]),
     (False, False, False, ["execute"]),

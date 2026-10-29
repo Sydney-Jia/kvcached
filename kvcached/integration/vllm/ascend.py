@@ -43,6 +43,9 @@ def validate_ascend_config(config):
     from kvcached.integration.vllm.ascend_compat import configured_mode
 
     configured_mode()
+    if (getattr(config, "additional_config", {}).get("kvcached_ascend_hybrid", False)
+            and getattr(getattr(config, "scheduler_config", None), "async_scheduling", False)):
+        raise KVCachedConfigError("Ascend hybrid candidate requires synchronous scheduling")
     if not config.model_config.enforce_eager:
         raise KVCachedConfigError("Ascend elastic KV currently requires --enforce-eager")
     if getattr(config.model_config, "enable_sleep_mode", False):
