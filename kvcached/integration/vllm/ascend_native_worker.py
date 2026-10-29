@@ -52,6 +52,13 @@ class NativeElasticWorker(NPUWorker):
         from vllm_ascend.worker.v2 import attn_utils
 
         from kvcached import vmm_ops
+        try:
+            from kvcached._npu_storage import wrap_nd_storage
+        except ImportError as exc:
+            raise RuntimeError(
+                "Build the native storage bridge with KVCACHED_BUILD_NPU_STORAGE=1 "
+                "against the installed torch and torch_npu"
+            ) from exc
 
         original = attn_utils._allocate_kv_cache
 
@@ -66,6 +73,7 @@ class NativeElasticWorker(NPUWorker):
             self.native_kv_pool = NativeKVPool(
                 config, device, vmm_ops, torch.npu.synchronize,
                 instance_name=f'kvcached_native_{os.getpid()}',
+                wrap_storage=wrap_nd_storage,
             )
             self.native_live_blocks = NativeLiveBlocks(len(config.kv_cache_groups), config.num_blocks)
             # Match the native initialized backing before warm-up kernels run.

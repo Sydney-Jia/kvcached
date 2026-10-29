@@ -121,3 +121,24 @@ def test_retirement_prepare_failure_restores_prior_groups(pool_class):
     assert not ops.pending
     assert pool.status()['mapped_bytes'] == 16 * page
     assert not pool.poisoned
+
+
+def test_native_wrapper_runs_before_views_and_initialization(pool_class):
+    ops = Operations()
+    page = 2 * 1024**2
+    descriptor = NS(size=2 * page, block_stride=page, offset=0, layer_stride=0,
+                    layers=['long', 'ring'], host_resident=False)
+    wrapped = []
+
+    def wrap(tensor):
+        assert tensor.region is None
+        assert not ops.events
+        wrapped.append(tensor)
+        return tensor
+
+    pool = pool_class(NS(num_blocks=2, kv_cache_tensors=[descriptor]), 'npu:0', ops,
+                      lambda: None, 'wrapper-test', wrap_storage=wrap)
+    assert len(wrapped) == 1
+    assert pool.views_by_layer()['long'] is pool.views_by_layer()['ring']
+    pool.ensure(full=True)
+    assert ops.events == [('zero', 0, 0, 2 * page)]

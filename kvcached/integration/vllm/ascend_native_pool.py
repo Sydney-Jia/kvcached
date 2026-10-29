@@ -13,7 +13,8 @@ from kvcached.integration.vllm.ascend_native_geometry import native_backings
 
 
 class NativeKVPool:
-    def __init__(self, config, device, operations, synchronize, instance_name):
+    def __init__(self, config, device, operations, synchronize, instance_name,
+                 wrap_storage=lambda tensor: tensor):
         self.backings = native_backings(config)
         self.num_blocks = config.num_blocks
         self.operations = operations
@@ -32,7 +33,9 @@ class NativeKVPool:
             )
             if len(tensors) != 1:
                 raise RuntimeError("Expected exactly one elastic tensor per native backing")
-            self.raw[backing.group_id] = tensors[0][:backing.size_bytes]
+            # ACLNN operators inspect native storage descriptors, which generic
+            # stable-ABI from_blob tensors do not carry. Wrap before any view.
+            self.raw[backing.group_id] = wrap_storage(tensors[0])[:backing.size_bytes]
 
     def views_by_layer(self):
         return {name: self.raw[b.group_id] for b in self.backings for name in b.layers}

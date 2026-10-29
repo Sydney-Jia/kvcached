@@ -45,8 +45,8 @@ def get_csrc_files(path) -> List[str]:
     return cpp_files
 
 
-# kvcached builds against libtorch stable ABI. Wheels are compatible with
-# Torch >= 2.10.
+# The core VMM extension uses the stable ABI (Torch >= 2.10). The optional
+# native NPU storage bridge must be rebuilt for the installed torch/torch_npu.
 # https://docs.pytorch.org/docs/2.10/notes/libtorch_stable_abi.html
 STABLE_ABI_TARGET = (2, 10)
 
@@ -158,7 +158,19 @@ def get_extensions():
             },
         )
     print(f"Building kvcached._C with backend: {backend_name} (stable ABI)")
-    return [ext_module], {"build_ext": BuildExtension}
+    extensions = [ext_module]
+    if os.getenv("KVCACHED_BUILD_NPU_STORAGE", "0") == "1":
+        if not is_ascend_build:
+            raise RuntimeError("The native NPU storage bridge requires an Ascend build")
+        npu_root = Path(importlib.util.find_spec("torch_npu").origin).parent
+        extensions.append(CppExtension(
+            "kvcached._npu_storage", ["csrc_ascend/native_storage.cpp"],
+            include_dirs=ext_include_dirs + [str(npu_root / "include")],
+            library_dirs=ext_library_dirs + [str(npu_root / "lib")],
+            libraries=["torch_npu", "ascendcl"],
+            extra_compile_args={"cxx": ["-std=c++17", "-O2"]},
+        ))
+    return extensions, {"build_ext": BuildExtension}
 
 
 ext_modules, cmdclass = get_extensions()
