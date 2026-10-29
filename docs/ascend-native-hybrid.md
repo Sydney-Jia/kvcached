@@ -70,18 +70,18 @@ bindings. Its dev RPC binds localhost; it is not a production serving recipe.
 
 ## Acceptance observations (2026-10-30)
 
-On Ascend 950DT with the above versions, short requests passed9/9, held-pool
-long/concurrent cases passed10/10, and live shrink/restore/demand-growth cases
-passed11/11. Each rank's mapped backing went from2,050MiB to8MiB with unchanged
+On Ascend 950DT with the above versions, short requests passed 9/9, held-pool
+long/concurrent cases passed 10/10, and live shrink/restore/demand-growth cases
+passed 11/11. Each rank's mapped backing went from 2,050 MiB to 8 MiB with unchanged
 virtual addresses. Driver-free and Torch allocated/reserved counters were
 recorded separately; unused framework cache trimming was applied to both
 held and elastic conditions. Bulk KV transitions took seconds, not zero time.
 
 A controlled pressure comparison used another Qwen3-0.6B engine on one card
-and a fixed4.125GiB physical allocation. Eight identical requests completed in
-9.59s with held KV versus4.76s after KV reclamation; sampled running concurrency
-rose from3 to8 and recipient peak HBM from2,447MiB to3,679MiB. Both sets of eight
-outputs were correct. The experiment retained the allocator's5% headroom;
+and a fixed 4.125 GiB physical allocation. Eight identical requests completed in
+9.59 s with held KV versus 4.76 s after KV reclamation; sampled running concurrency
+rose from 3 to 8 and recipient peak HBM from 2,447 MiB to 3,679 MiB. Both sets of eight
+outputs were correct. The experiment retained the allocator's 5% headroom;
 it did not exhaust raw HBM. These are scoped observations, not a general
 throughput guarantee or broad model-quality evaluation.
 
