@@ -45,3 +45,29 @@ def test_unsupported_state_contract_fails_closed(field, value):
     original["gdn"] = replace(original["gdn"], **{field: value})
     with pytest.raises(KVCachedConfigError):
         normalize_hybrid_specs(original)
+
+
+@pytest.mark.parametrize('state_key,index_key', [('state', 'ssm_state_indices'),
+                                              ('conv_state', 'cache_indices_opt')])
+def test_active_state_bridge_preserves_other_rows_and_padding(state_key, index_key):
+    import torch
+    from kvcached.integration.vllm.ascend_hybrid import call_with_compact_states
+
+    backing = torch.arange(8 * 64, dtype=torch.float32).reshape(8, 64)
+    state = backing[:, :12].view(8, 3, 4)
+    before = backing.clone()
+    indices = torch.tensor([5, -1, 2], dtype=torch.int32)
+
+    def native(**kwargs):
+        compact, local = kwargs[state_key], kwargs[index_key]
+        assert compact.shape == (3, 3, 4) and compact.is_contiguous()
+        assert local.tolist() == [0, -1, 2]
+        compact[0].add_(10)
+        compact[2].add_(20)
+        return compact.sum()
+
+    call_with_compact_states(native, (), {state_key: state, index_key: indices}, state_key, index_key)
+    expected = before.clone()
+    expected[5, :12] += 10
+    expected[2, :12] += 20
+    assert torch.equal(backing, expected)
