@@ -17,6 +17,7 @@ as CPU checks below. They do not reserve an NPU. Use the
 | Resize timing | `resize_latency.py`, optional `vmm_timing_preload.cpp` | Control acceptance, observed convergence, physical operations and output gaps as distinct measurements |
 | DeepSeek/Qwen co-location | `colocation_driver.py`, `colocation_service.py`, `colocation_http.py`, `colocation_deepseek_profile.json` | Large static service plus a single-card elastic service; not DeepSeek elasticity |
 | FIA diagnosis | `fia_reference.py`, `fia_trace.py`, `fia_compatibility.py` | A separate runtime/kernel compatibility check; not a substitute for memory tests |
+| Hybrid state ABI | `state_stride_probe.py` | Dense/strided native operator output and state-writeback diagnostics; fixed snapshot ABI, not a model acceptance test |
 | Process ownership | `process_identity.py` | Helpers for bounded supervision; not permission to stop unrelated work |
 
 The co-location driver takes external machine bindings using `--config`.
