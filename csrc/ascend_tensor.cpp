@@ -5,6 +5,9 @@
 #ifdef TORCH_STABLE_ONLY
 #undef TORCH_STABLE_ONLY
 #endif
+#ifdef TORCH_TARGET_VERSION
+#undef TORCH_TARGET_VERSION
+#endif
 #include <ATen/ATen.h>
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <torch_npu/csrc/aten/common/from_blob.h>
