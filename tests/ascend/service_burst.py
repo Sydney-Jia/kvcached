@@ -303,9 +303,68 @@ def run_trace(args, services, prompt):
             dump(path/'release-ballast.json',rpc(services[0],'audit_release_ballast'))
 
 
+def pressure_proof(args, services, prompt):
+    """Separate a raised logical quota from actual donor capacity release."""
+    assert not any(s['native'] for s in services)
+    config = json.loads(args.trace.read_text())
+    result = {'cases': [], 'batches': [], 'controls': [], 'samples': []}
+    path = args.output / f'pressure-proof-{args.name}.json'
+
+    def batch(service, label, count, observe=False):
+        origin = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=count) as executor:
+            futures = [executor.submit(request, service, prompt, i, origin, label, origin)
+                       for i in range(count)]
+            while not all(f.done() for f in futures):
+                if args.abort_file.exists():
+                    raise RuntimeError(args.abort_file.read_text())
+                if observe:
+                    sample = {'case': label, 'elapsed_s': time.monotonic()-origin,
+                              'control': {s['label']: limits(s) for s in services}}
+                    with http(service['port'], '/metrics', timeout=3) as response:
+                        sample['metrics'] = [line for line in response.read().decode().splitlines()
+                                             if not line.startswith('#') and any(name in line for name in
+                                                ('num_requests_running', 'num_requests_waiting'))]
+                    result['samples'].append(sample)
+                time.sleep(.2)
+            rows = [f.result() for f in futures]
+        result['cases'].extend(rows)
+        result['batches'].append({'case': label, 'elapsed_s': time.monotonic()-origin,
+                                 'correct': sum(r['correct'] for r in rows), 'count': count})
+        dump(path, result)
+        assert all(r['correct'] for r in rows)
+
+    for service in services:
+        result['controls'].append(resize(service, args.initial_mib))
+        batch(service, 'warm-'+service['label'], 2)
+        result.setdefault('trim', []).append(rpc(service, 'audit_trim_framework'))
+    result['before_pressure'] = {s['label']: limits(s) for s in services}
+    # The donor must really hold idle physical pages, not just an unused quota.
+    donor_charge = sum(g['charged_bytes'] for g in result['before_pressure']['B']['gpus'])
+    assert donor_charge >= 1600*MiB, donor_charge
+    allocated = False
+    try:
+        result['ballast'] = rpc(services[0], 'audit_allocate_ballast', config['ballast_bytes'])
+        allocated = True
+        result['controls'].append(resize(services[0], 2560))
+        result['before_no_release'] = {s['label']: rpc(s, 'kvcached_physical_snapshot') for s in services}
+        batch(services[0], 'quota_raised_without_donor_release', 8, True)
+        result['after_no_release'] = {s['label']: rpc(s, 'kvcached_physical_snapshot') for s in services}
+        result['controls'].append(resize(services[1], 1024))
+        result['after_donor_release'] = {s['label']: rpc(s, 'kvcached_physical_snapshot') for s in services}
+        batch(services[0], 'same_quota_after_donor_release', 8, True)
+        result['after_borrow'] = {s['label']: rpc(s, 'kvcached_physical_snapshot') for s in services}
+        result['completed'] = True
+    finally:
+        if allocated:
+            result['release_ballast'] = rpc(services[0], 'audit_release_ballast')
+        dump(path, result)
+    print('PRESSURE_PROOF', result['batches'], flush=True)
+
+
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('command',choices=('start','calibrate','trace','stop','status','prepare','correctness'))
+    p.add_argument('command',choices=('start','calibrate','trace','stop','status','prepare','correctness','pressure-proof'))
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--model',required=True)
     p.add_argument('--native',action='store_true')
@@ -343,6 +402,9 @@ def main():
     from transformers import AutoTokenizer
     tokenizer=AutoTokenizer.from_pretrained(args.model)
     prompt=prompt_ids(tokenizer,args.prompt_tokens)
+    if args.command=='pressure-proof':
+        pressure_proof(args,services,prompt)
+        return
     if args.command=='correctness':
         result={'cases':[],'controls':[],'purpose':'Different expected outputs across live engines and requests'}
         for cycle in range(4):
