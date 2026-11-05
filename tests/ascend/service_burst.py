@@ -64,12 +64,12 @@ def resize(service, mib, timeout=45):
     raise TimeoutError(str(observations[-1]))
 
 
-def prompt_ids(tokenizer, target=5000):
+def prompt_ids(tokenizer, target=5000, start_number=1):
     # Tokenization is deterministic. The complete rendered chat carries the
     # task at its end; repeated filler is intentionally not prefix-cached.
     filler = 'The archive contains background notes about rivers, forests and roads. '
     text = filler * (target // 12 + 10)
-    messages = [{'role': 'user', 'content': text + '\nIgnore the background. Count from 1 to 32, in order. Output only the comma-separated numbers, no explanation.'}]
+    messages = [{'role': 'user', 'content': text + f'\nIgnore the background. Count from {start_number} to {start_number+31}, in order. Output only the comma-separated numbers, no explanation.'}]
     ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
                                         enable_thinking=False, return_dict=False)
     if hasattr(ids, 'keys'):
@@ -85,7 +85,7 @@ def prompt_ids(tokenizer, target=5000):
     return ids
 
 
-def request(service, prompt, index, offered, phase, origin):
+def request(service, prompt, index, offered, phase, origin, expected_numbers=None):
     start = time.monotonic()
     record = dict(service=service['label'], index=index, phase=phase,
                   offered_s=offered-origin, sent_s=start-origin,
@@ -128,7 +128,9 @@ def request(service, prompt, index, offered, phase, origin):
     record['completion_tokens'] = count
     record['tpot_s'] = ((end-origin-record['chunks'][0]['at_s']) / max(1, count-1)) if record['chunks'] else None
     numbers = [int(x) for x in re.findall(r'\d+', record['text'])]
-    record['correct'] = record['completed'] and numbers == list(range(1, 33))
+    expected_numbers = list(range(1, 33)) if expected_numbers is None else expected_numbers
+    record['expected_numbers'] = expected_numbers
+    record['correct'] = record['completed'] and numbers == expected_numbers
     return record
 
 
@@ -303,7 +305,7 @@ def run_trace(args, services, prompt):
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('command',choices=('start','calibrate','trace','stop','status','prepare'))
+    p.add_argument('command',choices=('start','calibrate','trace','stop','status','prepare','correctness'))
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--model',required=True)
     p.add_argument('--native',action='store_true')
@@ -339,7 +341,35 @@ def main():
         dump(args.output/f'prepare-{args.name}.json',states)
         print(json.dumps(states));return
     from transformers import AutoTokenizer
-    prompt=prompt_ids(AutoTokenizer.from_pretrained(args.model),args.prompt_tokens)
+    tokenizer=AutoTokenizer.from_pretrained(args.model)
+    prompt=prompt_ids(tokenizer,args.prompt_tokens)
+    if args.command=='correctness':
+        result={'cases':[],'controls':[],'purpose':'Different expected outputs across live engines and requests'}
+        for cycle in range(4):
+            for s in services:
+                if not s['native']:
+                    result['controls'].append(resize(s,args.initial_mib))
+            donor=services[cycle%2]
+            receiver=services[1-cycle%2]
+            origin=time.monotonic()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures=[]
+                for i,s in enumerate([receiver,receiver,receiver,donor]):
+                    first=101+cycle*100+i*1000
+                    tokens=prompt_ids(tokenizer,args.prompt_tokens,first)
+                    futures.append(executor.submit(request,s,tokens,i,origin,f'unique{cycle}',origin,list(range(first,first+32))))
+                time.sleep(1)
+                if not donor['native']:
+                    result['controls'].append(resize(donor,1024))
+                    result['controls'].append(resize(receiver,2560))
+                result['cases'].extend(f.result() for f in futures)
+            dump(args.output/f'correctness-{args.name}.json',result)
+        result['passed']=all(c['correct'] for c in result['cases'])
+        dump(args.output/f'correctness-{args.name}.json',result)
+        print('DISTINCT_OUTPUTS',result['passed'],len(result['cases']))
+        if not result['passed']:
+            raise RuntimeError('Distinct output validation failed')
+        return
     if args.command=='calibrate':
         calibrate(args,services,prompt)
     else:
