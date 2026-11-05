@@ -303,7 +303,7 @@ def run_trace(args, services, prompt):
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('command',choices=('start','calibrate','trace','stop','status'))
+    p.add_argument('command',choices=('start','calibrate','trace','stop','status','prepare'))
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--model',required=True)
     p.add_argument('--native',action='store_true')
@@ -329,6 +329,15 @@ def main():
     if args.command=='status':
         print(json.dumps([{**s,'memory':rpc(s,'driver_memory_snapshot'),
                            'control':None if s['native'] else limits(s)} for s in services]));return
+    if args.command=='prepare':
+        states=[]
+        for s in services:
+            if not s['native']:
+                resize(s,args.initial_mib)
+            states.append({'label':s['label'],'trim':rpc(s,'audit_trim_framework'),
+                           'control':None if s['native'] else limits(s)})
+        dump(args.output/f'prepare-{args.name}.json',states)
+        print(json.dumps(states));return
     from transformers import AutoTokenizer
     prompt=prompt_ids(AutoTokenizer.from_pretrained(args.model),args.prompt_tokens)
     if args.command=='calibrate':
