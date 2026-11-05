@@ -13,6 +13,7 @@ as CPU checks below. They do not reserve an NPU. Use the
 | Basic model and prefix behavior | `single.py`, `dual.py`, `prefix.py`, `worker_probe.py` | Output equivalence and bounded block/prefix lifecycle behavior |
 | Installed service | `installed_serve.py` | CLI/HTTP activation, streaming, cancellation, runtime limits, restart and worker/IPC cleanup |
 | Capacity pressure | `three_arm.py`, `pressure_worker.py`, `pressure_protocol.py`, `pressure_stream.py` | Native / held / reclaim comparison with complete outputs and explicit latency targets |
+| Two live services and load shifts | `service_burst.py`, `service_burst_probe.py` | Open-loop latency/queue comparison, physical-donor control and distinct-output checks; see the [protocol and limitations](../../docs/ascend-service-burst.md) |
 | Natural elasticity and text workloads | `natural_elasticity.py`, `realistic_workloads.py` | Request-driven growth/return without publishing a quota; native output comparison |
 | Resize timing | `resize_latency.py`, optional `vmm_timing_preload.cpp` | Control acceptance, observed convergence, physical operations and output gaps as distinct measurements |
 | DeepSeek/Qwen co-location | `colocation_driver.py`, `colocation_service.py`, `colocation_http.py`, `colocation_deepseek_profile.json` | Large static service plus a single-card elastic service; not DeepSeek elasticity |
