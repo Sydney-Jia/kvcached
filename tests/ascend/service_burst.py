@@ -355,7 +355,7 @@ def main():
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures=[]
                 for i,s in enumerate([receiver,receiver,receiver,donor]):
-                    first=101+cycle*100+i*1000
+                    first=101+cycle*40+i*200
                     tokens=prompt_ids(tokenizer,args.prompt_tokens,first)
                     futures.append(executor.submit(request,s,tokens,i,origin,f'unique{cycle}',origin,list(range(first,first+32))))
                 time.sleep(1)
