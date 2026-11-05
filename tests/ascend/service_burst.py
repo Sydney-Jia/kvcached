@@ -141,6 +141,7 @@ def start(args):
         cmd = [sys.executable, '-m', 'vllm.entrypoints.cli.main', 'serve', args.model,
                '--host', '127.0.0.1', '--port', str(port), '--served-model-name', 'syd-model',
                '--enforce-eager', '--dtype', 'bfloat16', '--max-model-len', '8192',
+               '--gpu-memory-utilization', '0.40',
                '--max-num-seqs', '16', '--max-num-batched-tokens', '512',
                '--no-enable-prefix-caching', '--enable-chunked-prefill',
                '--kv-cache-memory-bytes', str((args.initial_mib if args.native else args.virtual_mib)*MiB),
