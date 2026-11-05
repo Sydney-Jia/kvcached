@@ -97,3 +97,57 @@ temporarily release more than the steady-state quota transfer, then regrow as
 requests return. Compare steady-state charged capacity, driver observations and
 workload behavior; do not equate a transient free-memory spike with permanent
 capacity gain.
+
+## Initial experiment findings (2026-11-05)
+
+This is a limited experiment, not a production acceptance result. Two independent
+Qwen3-8B services shared one A5 device, using a fixed 51.5546875 GiB CANN ballast,
+async scheduling, eager execution, and no prefix cache. A 310-second trace offered
+200 requests, with 5,000 input tokens and deterministic outputs. The declared
+joint latency target was TTFT <= 5 s, completion <= 12 s, and client-average
+TPOT <= 80 ms. The installed functional package was fixed at `37404b7`.
+
+| Arm | Complete passing runs | Joint target attainment | A-hot TTFT P95 |
+| --- | ---: | ---: | ---: |
+| Native fixed pools | 2 | 51.0-66.5% | 10.40-12.75 s |
+| kvcached fixed quotas | 3 | 26.0-39.0% | 14.10-32.32 s |
+| Dynamic, light control | 2 | 64.5-85.0% | 4.42-5.49 s |
+| Dynamic, intrusive driver observations | 1 | 73.5% | 4.78 s |
+
+Ranges are observed run minima/maxima, not confidence intervals. All 1,600
+requests in these eight complete runs matched the same 87-token native reference.
+The low-load B cohort during A-hot passed its latency targets in both light runs
+(8/8 each); its completion P95 was 4.06-4.53 s. A separate four-cycle test used
+different expected outputs across services and passed 16/16 requests.
+
+The separate physical-pressure probe held A's quota at 2,560 MiB in both cases.
+Reclaiming B increased driver free memory by 1,584 MiB without changing Torch
+reserved memory. A then grew from 1,872 to 2,448 MiB of physical KV capacity,
+increased maximum running requests from two to three, and finished eight requests
+in 12.01 s instead of 16.22 s. This probe had an idle donor; the traffic tests
+above assess low-load service protection.
+
+Important counterevidence and open issues:
+
+- One earlier dynamic run returned all 200 correct outputs but its final control
+  observation failed. It is excluded from the complete-run table. The harness
+  now retries transient lock-free observation misses and fails incomplete runs.
+- One earlier fixed run stalled both workers in NPU event synchronization:
+  29/200 requests completed, 171 timed out. Its requests, logs and native stacks
+  were retained. The root cause remains unresolved; subsequent successful runs
+  do not establish stability.
+- Light controls took 0.40-4.38 s and increased request preemption counts. Safe
+  physical page reclamation does not imply zero interruption or recomputation at
+  the engine scheduler layer.
+- Reverse B-hot TTFT P95 was 5.43 s and 16.07 s in the light runs; the second was
+  worse than both native runs. Overall ranges overlap. Timed quota changes are
+  not yet a validated adaptive controller.
+- Fixed kvcached was slower than native in this configuration. Page rounding,
+  integration/admission paths and unisolated host CPU are possible confounders;
+  attribution is incomplete. Ballast requested bytes were identical, while the
+  device-wide allocation delta differed by 0-4 MiB between runs.
+
+Prioritize reproducing the event wait and explaining fixed-quota baseline costs
+before adding a load-aware policy. That policy should account for queued and
+in-flight KV demand, donor latency and preemption cost, rather than treating
+quota convergence alone as success.
