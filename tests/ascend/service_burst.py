@@ -245,16 +245,22 @@ def run_trace(args, services, prompt):
         for event in config['events']:
             if stop.wait(max(0,origin+event['at_s']-time.monotonic())):
                 return
-            row={'scheduled_s':event['at_s'],'start_s':time.monotonic()-origin,'enabled':args.dynamic}
+            row={'scheduled_s':event['at_s'],'start_s':time.monotonic()-origin,'enabled':args.dynamic,
+                 'driver_rpc_in_control':not args.light_control}
             try:
                 if args.dynamic:
                     donor=next(s for s in services if s['label']==event['donor'])
                     receiver=next(s for s in services if s['label']==event['receiver'])
-                    row['before']={s['label']:rpc(s,'driver_memory_snapshot') for s in services}
+                    row['limits_before']={s['label']:limits(s) for s in services}
+                    if not args.light_control:
+                        row['before']={s['label']:rpc(s,'driver_memory_snapshot') for s in services}
                     row['donor']=resize(donor,event['donor_mib'])
-                    row['after_donor']={s['label']:rpc(s,'driver_memory_snapshot') for s in services}
+                    if not args.light_control:
+                        row['after_donor']={s['label']:rpc(s,'driver_memory_snapshot') for s in services}
                     row['receiver']=resize(receiver,event['receiver_mib'])
-                    row['after_receiver']={s['label']:rpc(s,'driver_memory_snapshot') for s in services}
+                    if not args.light_control:
+                        row['after_receiver']={s['label']:rpc(s,'driver_memory_snapshot') for s in services}
+                    row['limits_after']={s['label']:limits(s) for s in services}
                 row['end_s']=time.monotonic()-origin
             except Exception as error:
                 row['error']=repr(error)
@@ -290,6 +296,7 @@ def run_trace(args, services, prompt):
                 cases.append(future.result())
                 dump(path/'requests.json',cases)
         result={'completed':True,'dynamic':args.dynamic,'native':native,
+                'light_control':args.light_control,
                 'correct':sum(c['correct'] for c in cases),'offered':len(arrivals),
                 'elapsed_s':time.monotonic()-origin,'trace_sha256':hashlib.sha256(args.trace.read_bytes()).hexdigest()}
         dump(path/'summary.json',result)
@@ -374,6 +381,8 @@ def main():
     p.add_argument('--trace',type=Path)
     p.add_argument('--name',default='trace01')
     p.add_argument('--dynamic',action='store_true')
+    p.add_argument('--light-control',action='store_true',
+                   help='No intrusive device RPCs in timed resize actions; keep IPC and metrics sampling')
     p.add_argument('--abort-file',type=Path,required=True)
     args=p.parse_args();args.output.mkdir(parents=True,exist_ok=True)
     if args.command=='start':
