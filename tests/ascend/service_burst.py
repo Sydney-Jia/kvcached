@@ -65,9 +65,6 @@ def resize(service, mib, timeout=45):
 
 
 def prompt_ids(tokenizer, target=5000):
-    prefix = tokenizer.apply_chat_template([
-        {'role': 'user', 'content': 'Read the background notes, then follow the final instruction.\n'}],
-        tokenize=False, add_generation_prompt=False)
     # Tokenization is deterministic. The complete rendered chat carries the
     # task at its end; repeated filler is intentionally not prefix-cached.
     filler = 'The archive contains background notes about rivers, forests and roads. '
@@ -189,12 +186,12 @@ def calibrate(args, services, prompt):
             out['cases'].extend(cases)
             out['batches'].append({'service':label, 'size':size, 'elapsed_s':elapsed,
                                    'correct':sum(c['correct'] for c in cases)})
-            dump(args.output/'calibration.json',out)
+            dump(args.output/f'calibration-{args.name}.json',out)
             print('CALIBRATE',out['batches'][-1],flush=True)
             if not all(c['correct'] for c in cases):
                 raise RuntimeError('Calibration correctness failure')
         out.setdefault('memory',{})[label]=rpc(service,'audit_trim_framework')
-    dump(args.output/'calibration.json',out)
+    dump(args.output/f'calibration-{args.name}.json',out)
 
 
 def run_trace(args, services, prompt):
