@@ -58,10 +58,12 @@ def resize(service, mib, timeout=45):
         if state['converged']:
             return {'published': published, 'elapsed_s': time.monotonic()-start,
                     'observations': observations}
-        if state['status'] in ('failed', 'unavailable', 'unsupported'):
+        # The lock-free observer can return unavailable while a writer updates
+        # the ledger. Publication used a locked snapshot; allow bounded retries.
+        if state['status'] in ('failed', 'unsupported'):
             raise RuntimeError(str(state))
         time.sleep(.1)
-    raise TimeoutError(str(observations[-1]))
+    raise TimeoutError(str(observations[-1] if observations else published))
 
 
 def prompt_ids(tokenizer, target=5000, start_number=1):
@@ -295,12 +297,16 @@ def run_trace(args, services, prompt):
             for future in concurrent.futures.as_completed(futures):
                 cases.append(future.result())
                 dump(path/'requests.json',cases)
-        result={'completed':True,'dynamic':args.dynamic,'native':native,
+        controller.join(50)
+        controls_ok = not controller.is_alive() and all('error' not in row for row in actions)
+        result={'completed':True,'controls_ok':controls_ok,'dynamic':args.dynamic,'native':native,
                 'light_control':args.light_control,
                 'correct':sum(c['correct'] for c in cases),'offered':len(arrivals),
                 'elapsed_s':time.monotonic()-origin,'trace_sha256':hashlib.sha256(args.trace.read_bytes()).hexdigest()}
         dump(path/'summary.json',result)
         print('TRACE_DONE',args.name,result,flush=True)
+        if not controls_ok or result['correct'] != result['offered']:
+            raise RuntimeError('Trace request or control validation failed; retain all evidence')
     finally:
         stop.set();controller.join(50);monitor.join(10)
         # Completed and failed requests are retained even if the controller fails.
