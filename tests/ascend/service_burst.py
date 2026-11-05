@@ -71,11 +71,17 @@ def prompt_ids(tokenizer, target=5000):
     text = filler * (target // 12 + 10)
     messages = [{'role': 'user', 'content': text + '\nIgnore the background. Count from 1 to 32, in order. Output only the comma-separated numbers, no explanation.'}]
     ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
-                                        enable_thinking=False)
+                                        enable_thinking=False, return_dict=False)
+    if hasattr(ids, 'keys'):
+        ids = ids['input_ids']
+    if ids and isinstance(ids[0], list):
+        assert len(ids) == 1
+        ids = ids[0]
+    ids = list(ids)
     if len(ids) > target:
         # Preserve both chat boundaries and the complete final instruction.
         ids = ids[:24] + ids[-(target-24):]
-    assert 0 < len(ids) <= target
+    assert 0 < len(ids) <= target and all(isinstance(token, int) for token in ids)
     return ids
 
 
