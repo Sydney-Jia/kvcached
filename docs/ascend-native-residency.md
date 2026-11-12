@@ -91,9 +91,12 @@ control RPC is intended for controlled validation, not a public service API.
 Physical growth can also be blocked by unused arenas in PyTorch's separate
 allocator after a new workload shape. On the backend's explicit
 `capacity_exhausted:` rejection, the native adapter waits for a clean local
-growth rollback, fences the device, releases only unused PyTorch arenas and
-retries once. It records driver free bytes, torch allocated/reserved bytes and
-KV mapped bytes before/after this handoff. Count these separately from KV page
+growth rollback, fences the device, releases only unused PyTorch arenas,
+explicitly refreshes the shared physical budget, and retries once. The explicit
+refresh avoids using the normal sampler's one-second-old budget immediately
+after memory has been returned. It records driver free bytes, torch
+allocated/reserved bytes, the shared budget and KV mapped bytes before/after
+this handoff. Count these separately from KV page
 reclamation. Unknown device errors and poisoned transactions are never retried;
 the 95% capacity limit and all live/prefix owners remain unchanged.
 

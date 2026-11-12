@@ -40,7 +40,16 @@ class NativeStorageArena:
         free, total = torch.npu.mem_get_info()
         return dict(free=free, total=total, allocated=torch.npu.memory_allocated(),
                     reserved=torch.npu.memory_reserved(),
+                    physical_budget=self.operations.physical_budget_state(),
                     mapped_bytes=self.residency.status()['mapped_bytes'])
+
+    def _release_unused_allocator(self):
+        torch.npu.empty_cache()
+        # Grants normally sample at most once per second. A capacity rejection
+        # may have just refreshed that sample before empty_cache returned real
+        # memory, so the immediate bounded retry must request a fresh sample.
+        # Concurrent sampling can still win; grants retain all normal limits.
+        self.operations.recalibrate_physical_budget()
 
     def _report_capacity_relief(self, event):
         self.capacity_relief_attempts += 1
@@ -50,7 +59,7 @@ class NativeStorageArena:
 
     def ensure(self, desired):
         return ensure_with_allocator_relief(
-            self.residency, desired, torch.npu.empty_cache,
+            self.residency, desired, self._release_unused_allocator,
             self._allocator_snapshot, self._report_capacity_relief)
 
     def _initialize(self, key, pages):

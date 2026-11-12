@@ -22,6 +22,40 @@ fixtures = load('capacity_relief_fixtures', Path(__file__).with_name('test_physi
 
 
 class CapacityReliefTest(unittest.TestCase):
+    def test_native_handoff_refreshes_budget_before_immediate_retry(self):
+        tree = ast.parse((ROOT / 'kvcached/integration/vllm/native_storage.py').read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+                   and n.name == 'NativeStorageArena')
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef)
+                      and n.name == '_release_unused_allocator')
+        accounting = {'free': 0, 'budget': 0}
+        events = []
+
+        def empty_cache():
+            accounting['free'] = 64
+            events.append('release')
+
+        def recalibrate():
+            accounting['budget'] = accounting['free']
+            events.append('refresh')
+
+        def ensure(desired):
+            events.append('ensure')
+            if accounting['budget'] < 64:
+                raise RuntimeError('capacity_exhausted: stale budget')
+            return 64
+
+        namespace = {'torch': NS(npu=NS(empty_cache=empty_cache))}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), '<actual-native-handoff>', 'exec'), namespace)
+        arena = NS(operations=NS(recalibrate_physical_budget=recalibrate))
+        state = NS(poisoned=False, ensure=ensure, synchronize=lambda: events.append('fence'))
+        result = relief.ensure_with_allocator_relief(
+            state, {}, lambda: namespace['_release_unused_allocator'](arena),
+            lambda: dict(accounting), lambda event: None)
+        self.assertEqual(result, 64)
+        self.assertEqual(events, ['ensure', 'fence', 'release', 'refresh', 'ensure'])
+        self.assertFalse(state.poisoned)
+
     def test_partial_map_rollback_precedes_allocator_handoff(self):
         memory = fixtures.Memory()
         state = fixtures.module.PhysicalResidency(memory, memory.synchronize, memory.initialize)
