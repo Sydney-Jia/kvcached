@@ -5,6 +5,10 @@ logical block policy. It substitutes the storage backing those native views
 with the Ascend VMM backend. It does not normalize every model into one KV
 tensor layout or replace the native cache manager with a model-specific pool.
 
+The [2026-11-12 checkpoint](ascend-native-checkpoint-20261112.md) records the
+shared-build Qwen/DeepSeek, graph, physical borrowing and failure evidence,
+including measured overhead and unresolved boundaries.
+
 ## Responsibilities
 
 | Layer | Responsibility |

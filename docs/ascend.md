@@ -1,5 +1,12 @@
 # Experimental Ascend backend
 
+For the separate native V2 integration, see
+[native storage residency](ascend-native-residency.md). That adapter preserves
+the engine's multi-group views and does not use the model-specific hybrid
+normalization described below. This page retains the older integration contract;
+its limitations and experimental options must not be combined into one support
+matrix with the native V2 entry point.
+
 The Ascend backend implements the native VMM boundary with AscendCL and adds
 an opt-in vLLM-Ascend integration. Native allocation, single-engine Qwen
 inference, and two-engine reclamation have been tested on Ascend950DT. Do not infer

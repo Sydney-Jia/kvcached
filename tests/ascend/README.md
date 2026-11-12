@@ -7,6 +7,11 @@ as CPU checks below. They do not reserve an NPU. Use the
 
 ## Select the boundary to verify
 
+The explicit native V2 integration has a separate
+[checkpoint](../../docs/ascend-native-checkpoint-20261112.md) and
+`native_residency_http.py` serial HTTP smoke helper. Older probes below target
+their recorded integration and must not be assumed to activate the new adapter.
+
 | Boundary | Entry points | What the result can establish |
 |---|---|---|
 | VMM and independent memory observations | `physical_probe.py`, `driver_memory.py` | Physical return, address/data invariants and independent allocator observations |

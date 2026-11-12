@@ -62,6 +62,9 @@ The experimental Ascend backend has a separate, narrower
 matrix below does not imply equivalent NPU coverage.
 See the [Ascend checkpoint](docs/ascend-status.md) for completed evidence and
 remaining gaps, and the [probe guide](tests/ascend/README.md) for test entry points.
+The separate [native V2 residency adapter](docs/ascend-native-residency.md)
+preserves native multi-group layouts and ownership. It uses explicit worker
+and scheduler entry points rather than the legacy automatic patch path.
 
 | Engine | Versions | Attention types | Example models |
 |--------|----------|-----------------|----------------|

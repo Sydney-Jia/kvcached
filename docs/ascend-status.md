@@ -1,5 +1,10 @@
 # Ascend implementation checkpoint
 
+For the newer, separate native V2 entry point, read
+[native storage residency](ascend-native-residency.md). The dated results below
+remain the evidence for the older integration; they do not describe the new
+adapter's runtime or prove its acceptance gates.
+
 Status date: 2026-10-29. This document describes the experimental Ascend branch,
 not the support matrix of every kvcached backend. Installation and configuration
 remain in [ascend.md](ascend.md); probes are indexed in the
