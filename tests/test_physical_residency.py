@@ -105,6 +105,23 @@ class PhysicalTest(unittest.TestCase):
             self.pool.reclaim({'0': {0}, '1': {0}})
         self.assertEqual(self.pool.mapped, self.pool.full())
         self.assertFalse(self.memory.pending)
+        self.assertTrue(self.pool.poisoned)
+
+    def test_backend_quarantine_is_not_treated_as_capacity_shortage(self):
+        class QuarantinedError(RuntimeError):
+            pass
+
+        self.pool.fatal_errors = (QuarantinedError,)
+
+        def broken_map(*args):
+            raise QuarantinedError('backend mapping state is uncertain')
+
+        self.memory.map_to_kv_tensors_with_result = broken_map
+        with self.assertRaises(QuarantinedError):
+            self.pool.ensure(self.pool.full())
+        self.assertTrue(self.pool.poisoned)
+        with self.assertRaisesRegex(RuntimeError, 'poisoned'):
+            self.pool.ensure(self.pool.full())
 
     def test_failed_initialization_fences_then_discards_only_new_pages(self):
         self.pool.ensure({'0': {0}, '1': {0}})

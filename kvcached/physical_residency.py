@@ -10,10 +10,11 @@ from uuid import uuid4
 
 
 class PhysicalResidency:
-    def __init__(self, operations, synchronize, initialize):
+    def __init__(self, operations, synchronize, initialize, fatal_errors=()):
         self.operations = operations
         self.synchronize = synchronize
         self.initialize = initialize
+        self.fatal_errors = fatal_errors
         self.storages = {}
         self.pool_ids = {}
         self.mapped = {}
@@ -65,7 +66,11 @@ class PhysicalResidency:
                 self.mapped[key].update(attached)
             for key, pages in added.items():
                 self.initialize(key, pages)
-        except Exception:
+        except Exception as error:
+            # Backend quarantine means a map or its rollback has uncertain
+            # state. Rolling back other newly added pages does not repair it.
+            if isinstance(error, self.fatal_errors):
+                self.poisoned = True
             # Initialization may have enqueued device operations before failing.
             # Never remove their backing until completion has been established.
             try:
@@ -90,7 +95,11 @@ class PhysicalResidency:
         if not retiring:
             return 0
         # CPU lifetime updates do not complete prior eager or graph kernels.
-        self.synchronize()
+        try:
+            self.synchronize()
+        except Exception:
+            self.poisoned = True
+            raise
         transaction = 'residency-' + uuid4().hex
         prepared = []
         try:
@@ -99,7 +108,9 @@ class PhysicalResidency:
                         pages, transaction, self.pool_ids[key]):
                     raise RuntimeError("Physical retirement preparation failed")
                 prepared.append(key)
-        except Exception:
+        except Exception as error:
+            if isinstance(error, self.fatal_errors):
+                self.poisoned = True
             try:
                 for key in reversed(prepared):
                     if not self.operations.abort_unmap_from_kv_tensors(transaction, self.pool_ids[key]):

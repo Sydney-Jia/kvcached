@@ -13,6 +13,7 @@ import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from kvcached.physical_residency import PhysicalResidency
+from kvcached.errors import MapQuarantinedError, StateConsistencyError, QuarantinedResizeError
 from kvcached.residency import Layout, Storage, block_first_spans
 
 
@@ -22,7 +23,9 @@ class NativeStorageArena:
         self.operations = operations
         self.page_bytes = page_bytes
         self.raw = {}
-        self.residency = PhysicalResidency(operations, synchronize, self._initialize)
+        self.residency = PhysicalResidency(
+            operations, synchronize, self._initialize,
+            fatal_errors=(MapQuarantinedError, StateConsistencyError, QuarantinedResizeError))
         self._initialized = False
 
     def _initialize(self, key, pages):
