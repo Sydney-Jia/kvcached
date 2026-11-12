@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: Copyright contributors to the kvcached project
+# SPDX-License-Identifier: Apache-2.0
+"""Native V2 Ascend adapter for generic storage residency contracts.
+
+Pair with NativeResidencyScheduler; legacy autopatches must be disabled.
+Native layout construction and native logical/cache ownership remain intact.
+This experimental entry point reports evidence, not a universal support claim.
+"""
+
+import json
+import os
+import time
+from functools import wraps
+
+import torch
+from vllm_ascend.worker.worker import NPUWorker
+
+from kvcached.integration.vllm.native_storage import NativeByteAllocation, NativeStorageArena
+from kvcached.residency import ResidencyOwners
+
+
+class NativeElasticWorker(NPUWorker):
+    def init_device(self):
+        if any(os.getenv(key, '0').lower() in ('true', '1')
+               for key in ('ENABLE_KVCACHED', 'KVCACHED_AUTOPATCH')):
+            raise ValueError("Native residency must not run with legacy kvcached autopatches")
+        super().init_device()
+        config = self.vllm_config
+        if not self.use_v2_model_runner:
+            raise ValueError("This adapter requires the native V2 allocation/view contract")
+        if config.model_config.enable_sleep_mode:
+            raise ValueError("Only one physical storage owner is permitted; disable sleep mode")
+        if config.scheduler_config.async_scheduling:
+            raise ValueError("Queued execution needs an ownership-delivery protocol; use synchronous scheduling")
+        if config.kv_transfer_config is not None:
+            raise ValueError("Connector-owned transfers require additional completion owners")
+        for axis in ('pipeline_parallel_size', 'decode_context_parallel_size', 'prefill_context_parallel_size'):
+            if getattr(config.parallel_config, axis, 1) != 1:
+                raise ValueError(f"{axis} requires an additional distributed lifetime contract")
+        self.native_arena = None
+        self.native_owners = None
+        self.native_epoch = 0
+        self.native_elastic = False
+        self.native_steps = 0
+
+    def initialize_from_config(self, kv_cache_config):
+        from kvcached import vmm_ops
+        from vllm_ascend.worker.v2 import attn_utils
+
+        if self.native_arena is not None:
+            raise RuntimeError("Persistent elastic cache cannot be initialized twice")
+        arena = NativeStorageArena(self.device, vmm_ops, torch.npu.synchronize)
+        allocate = attn_utils._allocate_kv_cache
+        reshape = attn_utils._reshape_kv_cache_v2
+        allocations = 0
+
+        @wraps(allocate)
+        def allocate_native(*args, **kwargs):
+            nonlocal allocations
+            allocations += 1
+            if allocations != 1:
+                raise RuntimeError("Expected one persistent native allocation phase")
+            with NativeByteAllocation(arena):
+                return allocate(*args, **kwargs)
+
+        @wraps(reshape)
+        def reshape_native(*args, **kwargs):
+            views = reshape(*args, **kwargs)
+            config = kwargs.get('kv_cache_config')
+            if config is None:
+                raise ValueError("Native reshape did not supply its cache configuration")
+            self.native_owners = ResidencyOwners(arena.layout(config, views))
+            # Null/padding slots can be accessed by empty DP batches and graphs.
+            self.native_owners.replace({'null': [(group, 0)
+                                        for group in self.native_owners.layout.groups]})
+            return views
+
+        # Worker initialization is serialized. Limit hook lifetime to the one
+        # persistent phase; profiling/capture's temporary caches remain native.
+        attn_utils._allocate_kv_cache = allocate_native
+        attn_utils._reshape_kv_cache_v2 = reshape_native
+        try:
+            super().initialize_from_config(kv_cache_config)
+        finally:
+            attn_utils._allocate_kv_cache = allocate
+            attn_utils._reshape_kv_cache_v2 = reshape
+        if allocations != 1 or not arena.raw or self.native_owners is None:
+            raise RuntimeError("Native storage hook did not materialize a validated layout")
+        self.native_arena = arena
+        torch.npu.synchronize()
+        print('KVCACHED_GENERIC_LAYOUT ' + json.dumps(self._native_status()), flush=True)
+
+    def execute_model(self, scheduler_output):
+        if self.native_arena is None:
+            raise RuntimeError("Native residency is not initialized")
+        snapshot = getattr(scheduler_output, 'kvcached_ownership', None)
+        layout = self.native_owners.layout
+        if snapshot is None or snapshot.version != 1:
+            raise ValueError("Missing native ownership: select NativeResidencyScheduler and check executor transport")
+        if (snapshot.epoch != self.native_epoch + 1 or snapshot.num_groups != len(layout.groups)
+                or set(layout.block_counts.values()) != {snapshot.num_blocks}):
+            raise ValueError("Native ownership epoch or layout identity changed")
+        self.native_owners.replace(snapshot.owners)
+        required = self.native_owners.required_pages()
+        self.native_arena.residency.ensure(required)
+        if self.native_elastic:
+            # Full device completion fences all streams, including graph-update
+            # and state-copy streams. Optimize only after event coverage proof.
+            self.native_arena.residency.reclaim(required)
+        self.native_epoch = snapshot.epoch
+        self.native_steps += 1
+        return super().execute_model(scheduler_output)
+
+    def _native_status(self):
+        arena = self.native_arena
+        layout = self.native_owners.layout
+        return dict(arena.residency.status(), elastic=self.native_elastic,
+                    epoch=self.native_epoch, steps=self.native_steps,
+                    rank=self.rank, dp_rank=self.vllm_config.parallel_config.data_parallel_rank,
+                    pid=os.getpid(), device=str(self.device), groups=len(layout.groups),
+                    group_blocks=layout.block_counts, spans=len(layout.spans),
+                    base_addresses={key: raw.data_ptr() for key, raw in arena.raw.items()},
+                    owners=self.native_owners.snapshot())
+
+    def kvcached_native_control(self, action='status'):
+        if self.native_arena is None:
+            raise RuntimeError("Native residency is not initialized")
+        started = time.monotonic()
+        before, total = torch.npu.mem_get_info()
+        reclaimed = 0
+        if action == 'elastic':
+            reclaimed = self.native_arena.residency.reclaim(self.native_owners.required_pages())
+            self.native_elastic = True
+        elif action == 'held':
+            self.native_arena.residency.ensure(self.native_arena.residency.full())
+            torch.npu.synchronize()
+            self.native_elastic = False
+        elif action == 'trim_allocator':
+            torch.npu.synchronize()
+            torch.npu.empty_cache()
+        elif action != 'status':
+            raise ValueError(f"Unknown residency action {action!r}")
+        after, _ = torch.npu.mem_get_info()
+        result = dict(self._native_status(), action=action, reclaimed_bytes=reclaimed,
+                      driver_free_before=before, driver_free_after=after, driver_total=total,
+                      elapsed_ms=(time.monotonic() - started) * 1000)
+        print('KVCACHED_GENERIC_CONTROL ' + json.dumps(result), flush=True)
+        return result
