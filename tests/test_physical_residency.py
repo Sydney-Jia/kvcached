@@ -16,6 +16,8 @@ class Memory:
         self.pending = {}
         self.fail_map = None
         self.fail_prepare = None
+        self.fail_commit = None
+        self.fail_abort = None
         self.fence_ok = True
         self.log = []
 
@@ -46,10 +48,14 @@ class Memory:
         return True
 
     def abort_unmap_from_kv_tensors(self, transaction, pool):
+        if pool == self.fail_abort:
+            return False
         self.data[pool].update(self.pending.pop((transaction, pool)))
         return True
 
     def commit_unmap_from_kv_tensors(self, transaction, pool):
+        if pool == self.fail_commit:
+            return False
         self.pending.pop((transaction, pool))
         return True
 
@@ -99,6 +105,40 @@ class PhysicalTest(unittest.TestCase):
             self.pool.reclaim({'0': {0}, '1': {0}})
         self.assertEqual(self.pool.mapped, self.pool.full())
         self.assertFalse(self.memory.pending)
+
+    def test_failed_initialization_fences_then_discards_only_new_pages(self):
+        self.pool.ensure({'0': {0}, '1': {0}})
+        self.memory.data[0][0] = 'existing prefix'
+
+        def fail_initialization(key, pages):
+            raise RuntimeError('kernel submission failed')
+
+        self.pool.initialize = fail_initialization
+        with self.assertRaisesRegex(RuntimeError, 'kernel submission failed'):
+            self.pool.ensure(self.pool.full())
+        self.assertIn('fence', self.memory.log)
+        self.assertEqual(self.memory.data, {0: {0: 'existing prefix'}, 1: {0: 0}})
+        self.assertFalse(self.pool.poisoned)
+
+    def test_failed_retirement_rollback_poison_prevents_reuse(self):
+        self.pool.ensure(self.pool.full())
+        self.memory.fail_prepare = 1
+        self.memory.fail_abort = 0
+        with self.assertRaisesRegex(RuntimeError, 'rollback failed'):
+            self.pool.reclaim({'0': {0}, '1': {0}})
+        self.assertTrue(self.pool.poisoned)
+        with self.assertRaisesRegex(RuntimeError, 'poisoned'):
+            self.pool.ensure(self.pool.full())
+
+    def test_partial_commit_cannot_restore_released_contents(self):
+        self.pool.ensure(self.pool.full())
+        self.memory.fail_commit = 1
+        with self.assertRaisesRegex(RuntimeError, 'commit failed'):
+            self.pool.reclaim({'0': {0}, '1': {0}})
+        self.assertTrue(self.pool.poisoned)
+        self.assertEqual(self.pool.mapped['0'], {0})
+        with self.assertRaisesRegex(RuntimeError, 'poisoned'):
+            self.pool.reclaim({'0': {0}, '1': {0}})
 
     def test_invalid_snapshot_is_rejected_before_any_mapping(self):
         for pages in ({'0': {0}}, {'0': {49}, '1': {0}}, {'0': {1}, '1': {0}}):
