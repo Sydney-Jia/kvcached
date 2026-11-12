@@ -88,6 +88,24 @@ installed source.
 allocator; its effects must not be attributed to KV page retirement. The
 control RPC is intended for controlled validation, not a public service API.
 
+Physical growth can also be blocked by unused arenas in PyTorch's separate
+allocator after a new workload shape. On the backend's explicit
+`capacity_exhausted:` rejection, the native adapter waits for a clean local
+growth rollback, fences the device, releases only unused PyTorch arenas and
+retries once. It records driver free bytes, torch allocated/reserved bytes and
+KV mapped bytes before/after this handoff. Count these separately from KV page
+reclamation. Unknown device errors and poisoned transactions are never retried;
+the 95% capacity limit and all live/prefix owners remain unchanged.
+
+A rejected `held` control returns `ok: false` with a rejection reason and keeps
+that worker's previous mode. It does not throw an expected capacity exception
+through the MP executor's response queues. Callers must check every result;
+HTTP 200 alone is not success. This is not an atomic cross-rank policy change:
+some workers can succeed while another rejects. The current DP frontend also
+returns only its first engine's results, so validation retains all worker
+control logs. Normal serving growth still needs admission if one retry cannot
+obtain capacity; this change does not implement scheduler waiting.
+
 `KVCACHED_TRACE_GRAPHS=1` instruments actual NPUGraph construction and replay
 calls. Compare counters before and after serving requests: capture settings
 alone, or startup warmup replay counts, do not prove serving uses graphs.

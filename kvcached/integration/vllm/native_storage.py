@@ -7,6 +7,7 @@ KV allocator. It never changes process-wide torch allocation or rewrites model
 views. Explicit metadata validation follows allocation before elastic use.
 """
 
+import json
 import os
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from kvcached.physical_residency import PhysicalResidency
+from kvcached.capacity_relief import ensure_with_allocator_relief
 from kvcached.errors import MapQuarantinedError, StateConsistencyError, QuarantinedResizeError
 from kvcached.residency import Layout, Storage, block_first_spans
 
@@ -31,6 +33,25 @@ class NativeStorageArena:
             operations, synchronize, self._initialize,
             fatal_errors=(MapQuarantinedError, StateConsistencyError, QuarantinedResizeError))
         self._initialized = False
+        self.capacity_relief_attempts = 0
+        self.last_capacity_relief = None
+
+    def _allocator_snapshot(self):
+        free, total = torch.npu.mem_get_info()
+        return dict(free=free, total=total, allocated=torch.npu.memory_allocated(),
+                    reserved=torch.npu.memory_reserved(),
+                    mapped_bytes=self.residency.status()['mapped_bytes'])
+
+    def _report_capacity_relief(self, event):
+        self.capacity_relief_attempts += 1
+        self.last_capacity_relief = event
+        print('KVCACHED_NATIVE_CAPACITY_RELIEF ' + json.dumps(
+            dict(instance=self.instance_name, device=str(self.device), **event)), flush=True)
+
+    def ensure(self, desired):
+        return ensure_with_allocator_relief(
+            self.residency, desired, torch.npu.empty_cache,
+            self._allocator_snapshot, self._report_capacity_relief)
 
     def _initialize(self, key, pages):
         storage = self.residency.storages[key]
@@ -57,7 +78,7 @@ class NativeStorageArena:
             raise RuntimeError("Raw storage factory must return exactly one byte tensor")
         self.raw[storage.key] = tensors[0][:storage.size_bytes]
         self.residency.register(storage, pool_id)
-        self.residency.ensure(self.residency.full())
+        self.ensure(self.residency.full())
         return self.raw[storage.key]
 
     def find_storage(self, tensor):

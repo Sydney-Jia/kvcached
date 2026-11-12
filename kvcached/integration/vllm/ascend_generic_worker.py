@@ -18,6 +18,7 @@ from vllm_ascend.worker.worker import NPUWorker
 from kvcached.integration.vllm.native_storage import NativeByteAllocation, NativeStorageArena
 from kvcached.integration.vllm.native_residency import dummy_state_owners
 from kvcached.residency import ResidencyOwners
+from kvcached.capacity_relief import is_capacity_rejection
 
 
 class NativeElasticWorker(NPUWorker):
@@ -138,7 +139,7 @@ class NativeElasticWorker(NPUWorker):
             blocks = dummy_state_owners(self.native_owners.layout.block_counts,
                                         input_batch.num_reqs)
             self.native_owners.replace({'runtime-dummy': blocks})
-            self.native_arena.residency.ensure(self.native_owners.required_pages())
+            self.native_arena.ensure(self.native_owners.required_pages())
             self._trace_residency('dummy-backed')
             result = prepare_dummy(input_batch, *args, **kwargs)
             self._trace_residency('dummy-ready')
@@ -201,7 +202,7 @@ class NativeElasticWorker(NPUWorker):
         if self.native_mapped_revision != self.native_owners.revision:
             required = self.native_owners.required_pages()
             self._trace_residency('ensure-enter')
-            self.native_arena.residency.ensure(required)
+            self.native_arena.ensure(required)
             self._trace_residency('ensure-complete')
             if self.native_elastic:
                 # Full device completion fences all streams, including graph-update
@@ -237,20 +238,33 @@ class NativeElasticWorker(NPUWorker):
         started = time.monotonic()
         before, total = torch.npu.mem_get_info()
         reclaimed = 0
+        rejection = None
         if action == 'elastic':
             reclaimed = self.native_arena.residency.reclaim(self.native_owners.required_pages())
             self.native_elastic = True
         elif action == 'held':
-            self.native_arena.residency.ensure(self.native_arena.residency.full())
-            torch.npu.synchronize()
-            self.native_elastic = False
+            try:
+                self.native_arena.ensure(self.native_arena.residency.full())
+            except RuntimeError as error:
+                if self.native_arena.residency.poisoned or not is_capacity_rejection(error):
+                    raise
+                # A recoverable policy rejection is a normal RPC result. Let
+                # every TP worker return its response; throwing here can leave
+                # later collectives reading an earlier worker response.
+                rejection = str(error)
+            if rejection is None:
+                torch.npu.synchronize()
+                self.native_elastic = False
         elif action == 'trim_allocator':
             torch.npu.synchronize()
             torch.npu.empty_cache()
         elif action != 'status':
             raise ValueError(f"Unknown residency action {action!r}")
         after, _ = torch.npu.mem_get_info()
-        result = dict(self._native_status(), action=action, reclaimed_bytes=reclaimed,
+        result = dict(self._native_status(), action=action, ok=rejection is None,
+                      rejection=rejection, reclaimed_bytes=reclaimed,
+                      capacity_relief_attempts=self.native_arena.capacity_relief_attempts,
+                      last_capacity_relief=self.native_arena.last_capacity_relief,
                       driver_free_before=before, driver_free_after=after, driver_total=total,
                       elapsed_ms=(time.monotonic() - started) * 1000)
         print('KVCACHED_GENERIC_CONTROL ' + json.dumps(result), flush=True)
