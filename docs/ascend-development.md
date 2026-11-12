@@ -34,39 +34,43 @@ Legacy entry points still exist in this branch's history/tree; new capabilities
 target the explicit native adapter. Their historical tests are not automatically
 acceptance for the new adapter, and they are not parallel active product lines.
 
-## Existing branches
+## Active branches and archived history
 
-| Branch | Role from this checkpoint | Preservation / integration status |
+Only `main` and `feat/ascend-generic-kv` remain as branches locally, in the GitHub
+fork and in the server Git exchange. Four old branch pointers were removed after
+migration, regression and archive-tag verification:
+
+| Former branch | Preserved tag | Disposition |
 |---|---|---|
-| `main` | Upstream baseline | Retained; not the current Ascend build |
-| `feat/ascend-generic-kv` | Only active Ascend integration line | Implement, test and document new shared capabilities here |
-| `feat/ascend-vmm` | Frozen first implementation | Entire head is an ancestor of generic; archive tag `archive/ascend-vmm-20261029` at `357ed3d` |
-| `experiment/ascend-hybrid-kv` | Frozen early hybrid prototype | Entire head is an ancestor of generic; archive tag `archive/ascend-hybrid-kv-20261030` at `abb4112` |
-| `feat/ascend-dsv41-hybrid` | Frozen native-layout prototype | Not merged as a branch; selected fixes/contracts reimplemented. Tag `archive/ascend-dsv41-hybrid-20261030` at `1638260`; keep old tests and failure records |
-| `experiment/ascend-service-burst` | Frozen workload experiment and migration source | Extends the DeepSeek prototype; not merged into generic. Tag `archive/ascend-service-burst-20261105` at `0fb3930` |
+| `feat/ascend-vmm` | `archive/ascend-vmm-20261029`, `357ed3d` | Entire head already inherited |
+| `experiment/ascend-hybrid-kv` | `archive/ascend-hybrid-kv-20261030`, `abb4112` | Entire head already inherited |
+| `feat/ascend-dsv41-hybrid` | `archive/ascend-dsv41-hybrid-20261030`, `1638260` | Generic contracts replace old worker; missing invariant tests migrated |
+| `experiment/ascend-service-burst` | `archive/ascend-service-burst-20261105`, `0fb3930` | Measurement protocol ported; old launcher and results archived |
 
-These are lifecycle designations, not GitHub branch protections. Branch pointers
-and worktrees remain during this consolidation; archive tags preserve their
-exact commits. No branch deletion or deployed-source transition is implied.
-Old branches receive no new capabilities. A necessary historical fix must be
-explicitly scoped, with an equivalent regression evaluated on the current line.
+The two redundant linked worktrees were removed after checking tracked/untracked
+files and backing up ignored cache files. The primary repository stays on `main`;
+the generic linked worktree is the development entry. Archive tags and raw local/
+remote experiment directories remain. Deployed sources/services are unchanged.
 
-## What remains to transfer
+## Completed migration
 
-The native DeepSeek prototype contributed physical device identity, native ND
-storage requirements, stable backing, page unions, all-rank measurements and
-separation of torch cache trimming from KV reclaim. The generic implementation
-now owns these responsibilities; do not merge its model-specific worker on top.
-Audit remaining old tests for reusable invariants and keep model/runtime-specific
-launch recipes with their original evidence.
+The [28-commit audit](ascend-branch-migration.md) records every unique DeepSeek/burst
+commit and the disposition of its files. Physical device identity, native ND
+storage, page unions, all-rank measurements and separate torch cache trimming
+already had generic equivalents. The remaining portable assets are now migrated:
 
-The burst branch adds six files relative to its DeepSeek parent: a traffic trace
-harness, measurement worker, control tests, documentation and test-index entries.
-Its open-loop arrivals, distinct-output correctness checks, queue/latency metrics,
-light versus intrusive observations and failure records are reusable. Its old
-quota and worker APIs are not the native residency contract. Port the harness
-through a measurement/control adapter and rerun it; do not carry its old SLO
-results forward as results for generic.
+- ND/FP8 hardware regression: native metadata, alias lifetime, stable addresses
+  and live-page preservation through partial retirement and remapping.
+- Ownership regression: block replacement/preemption while preserving unscheduled
+  requests and retained prefixes.
+- [Configuration-driven burst protocol](ascend-service-burst.md): offered arrivals,
+  strict full-response checks, paired references, latency/queue observations,
+  explicit held/elastic control, failure evidence and CPU HTTP regression tests.
+
+At test commit `787a7e2`, Linux targeted regression passed 41 tests; single-NPU
+storage regression passed 5 tests (2 unrelated tests deselected). Runtime sources
+are identical to the `decad6a` wheel used in those NPU tests and prior model
+acceptance. Protocol tests do not establish new serving-performance/SLO results.
 
 ## Bounded research candidates
 
@@ -79,7 +83,7 @@ base commit, acceptance checks and decision to integrate or archive.
 | 1 | Can physical-capacity admission coordinate all affected ranks before execution? | Insufficient capacity waits/rejects cleanly, cancellation releases ownership, asymmetric rank failures do not deadlock or partially advance execution |
 | 2 | Can residency reserves / coalesced operations / narrower fences reduce reclaim overhead? | Same correctness and physical borrowing checks, with measured control latency, token gaps, throughput and capacity tradeoffs |
 | 3 | Can queued execution and transfers publish complete owner lifetimes? | Async/graph/connector completion coverage, overlapping execution and cancellation tests; no silent fallback |
-| Validation | Can the burst harness evaluate the new native adapter? | Native/held/elastic matched conditions, both tenants' output and latency, fixed traffic and pressure, all offered requests counted |
+| Validation | Can the migrated burst tool demonstrate benefits under matched serving load? | Native/held/elastic matched conditions, both tenants' output and latency, fixed traffic and pressure, all offered requests counted |
 
 Correctness defects, including investigation of the earlier MegaMoE timeout,
 are normal fixes on this development line, not permanent model-specific research
