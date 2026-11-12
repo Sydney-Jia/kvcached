@@ -47,6 +47,13 @@ class NativeElasticWorker(NPUWorker):
         self.native_graph_replays = 0
         self.native_graph_captures = 0
         self.native_trace_residency = os.getenv('KVCACHED_TRACE_RESIDENCY') == '1'
+        if self.native_trace_residency:
+            from pathlib import Path
+            directory = Path(os.getenv('KVCACHED_TRACE_DIR', '/tmp/kvcached-residency'))
+            directory.mkdir(parents=True, exist_ok=True)
+            self.native_trace_file = (directory / (
+                f'dp{config.parallel_config.data_parallel_rank}-tp{self.rank}-{os.getpid()}.txt'
+            )).open('a')
         if os.getenv('KVCACHED_TRACE_GRAPHS') == '1':
             # Validation instrumentation only; count real native API calls,
             # not configuration flags. Compare before/after-request counters
@@ -158,7 +165,7 @@ class NativeElasticWorker(NPUWorker):
         self._trace_residency(phase + '-call')
         if self.native_trace_residency:
             import faulthandler
-            faulthandler.dump_traceback_later(45, repeat=False)
+            faulthandler.dump_traceback_later(45, repeat=False, file=self.native_trace_file)
         try:
             return function(*args)
         finally:
