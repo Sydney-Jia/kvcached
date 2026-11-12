@@ -177,6 +177,8 @@ class ResidencyOwners:
         self._owners: dict[str, frozenset[tuple[int, int]]] = {}
         self._executions: dict[str, tuple[frozenset[tuple[int, int]], Callable[[], bool]]] = {}
         self.revision = 0
+        self._pages_revision = -1
+        self._pages = None
 
     @staticmethod
     def _check_owner(owner: str) -> None:
@@ -198,8 +200,9 @@ class ResidencyOwners:
                 raise ValueError(f"Cannot release unknown owner {owner!r}")
             del current[owner]
         current.update(validated)
-        self._owners = current
-        self.revision += 1
+        if current != self._owners:
+            self._owners = current
+            self.revision += 1
 
     def begin_execution(self, identity: str, blocks: Iterable[tuple[int, int]],
                         completed: Callable[[], bool]) -> None:
@@ -220,10 +223,14 @@ class ResidencyOwners:
         return len(done)
 
     def required_pages(self) -> dict[str, frozenset[int]]:
+        if self._pages_revision == self.revision:
+            return dict(self._pages)
         blocks = set().union(*self._owners.values())
         for execution, _ in self._executions.values():
             blocks.update(execution)
-        return self.layout.pages_for(blocks)
+        self._pages = self.layout.pages_for(blocks)
+        self._pages_revision = self.revision
+        return dict(self._pages)
 
     def snapshot(self) -> dict:
         return {"revision": self.revision, "owners": len(self._owners),

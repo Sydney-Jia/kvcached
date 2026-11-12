@@ -8,6 +8,8 @@ portable cases exercise the actual C++ method bodies without a GPU/toolkit.
 CUDA state and FTensor materialization are controlled boundaries.
 """
 
+import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,10 +30,11 @@ def _method(source, signature):
 
 @pytest.fixture(scope="module")
 def device_probe(tmp_path_factory):
-    compiler = shutil.which("c++")
-    if compiler is None:
+    # Runtime images may provide a complete toolchain through CXX while the
+    # system c++ lacks its linker/sysroot. Match the package build toolchain.
+    compiler = shlex.split(os.environ.get("CXX", "c++"))
+    if not compiler or shutil.which(compiler[0]) is None:
         pytest.skip("C++ compiler required")
-    assert compiler is not None
     root = Path(__file__).resolve().parents[1]
     allocator = (root / "csrc/allocator.cpp").read_text()
     pages = (root / "csrc/page_allocator.cpp").read_text()
@@ -49,7 +52,7 @@ def device_probe(tmp_path_factory):
     source = build / "probe.cpp"
     source.write_text(_RUNTIME + methods + _CASES)
     binary = build / "probe"
-    subprocess.run([compiler, "-std=c++17", "-pthread", str(source), "-o", str(binary)],
+    subprocess.run([*compiler, "-std=c++17", "-pthread", str(source), "-o", str(binary)],
                    check=True, capture_output=True, text=True)
     return binary
 

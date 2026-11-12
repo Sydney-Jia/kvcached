@@ -42,6 +42,7 @@ class NativeElasticWorker(NPUWorker):
         self.native_epoch = 0
         self.native_elastic = False
         self.native_steps = 0
+        self.native_mapped_revision = -1
         self.native_graph_replays = 0
         self.native_graph_captures = 0
         if os.getenv('KVCACHED_TRACE_GRAPHS') == '1':
@@ -117,12 +118,14 @@ class NativeElasticWorker(NPUWorker):
                 or set(layout.block_counts.values()) != {snapshot.num_blocks}):
             raise ValueError("Native ownership epoch or layout identity changed")
         self.native_owners.replace(snapshot.owners)
-        required = self.native_owners.required_pages()
-        self.native_arena.residency.ensure(required)
-        if self.native_elastic:
-            # Full device completion fences all streams, including graph-update
-            # and state-copy streams. Optimize only after event coverage proof.
-            self.native_arena.residency.reclaim(required)
+        if self.native_mapped_revision != self.native_owners.revision:
+            required = self.native_owners.required_pages()
+            self.native_arena.residency.ensure(required)
+            if self.native_elastic:
+                # Full device completion fences all streams, including graph-update
+                # and state-copy streams. Optimize only after event coverage proof.
+                self.native_arena.residency.reclaim(required)
+            self.native_mapped_revision = self.native_owners.revision
         self.native_epoch = snapshot.epoch
         self.native_steps += 1
         return super().execute_model(scheduler_output)
