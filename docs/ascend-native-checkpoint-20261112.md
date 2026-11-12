@@ -19,6 +19,14 @@ not the legacy autopatch support matrix or a claim of production readiness.
 
 ## Observed acceptance
 
+The inspected upstream snapshot `b2737741193ef12fdc5dbc7cdc72d7826adc61fd`
+already declares hybrid attention support and contains CUDA graph profiling /
+temporary-cache lifecycle handling in `model_runner_v2.py` and `patches.py`.
+This work is not the first implementation of hybrid caches or graphs in
+kvcached. Its contribution is the explicit native Ascend storage/ownership
+contract and NPU evidence for the tested multi-group execution paths. Upstream
+GPU support does not automatically establish Ascend support.
+
 | Workload | Evidence and scope |
 |---|---|
 | Local quantized Qwen27B, TP1 | Native architecture `Qwen3_5ForConditionalGeneration`; four groups, one allocation, 320 view spans. Independent native and candidate eager / FULL_DECODE_ONLY services. Native-repeat, held, elastic and restored outputs match; 256-token live shrink matches held. Each execution mode passes 23 concurrent comparisons and three post-cancellation comparisons. |
