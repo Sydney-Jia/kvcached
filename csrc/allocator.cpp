@@ -283,6 +283,10 @@ void FTensorAllocator::init(const std::string &dev_str, size_t page_size,
   }
 
   torch::stable::Device device(dev_str);
+  if (device.is_cuda() && device.index() < 0) {
+    device = torch::stable::Device("cuda:" +
+                                   std::to_string(gpu_vmm::current_device()));
+  }
   g_device_ = device;
   g_contiguous_layout_ = contiguous_layout;
   const char *explicit_name = std::getenv("KVCACHED_IPC_NAME");
@@ -292,6 +296,17 @@ void FTensorAllocator::init(const std::string &dev_str, size_t page_size,
                          : "kvcached_native_" + std::to_string(getpid());
   g_allocators_[0] =
       std::make_unique<FTensorAllocator>(device, contiguous_layout);
+}
+
+int FTensorAllocator::device_index() {
+  std::lock_guard<std::mutex> lock(g_allocator_mutex_);
+  return g_allocators_.empty() || !g_device_.is_cuda() ? -1 : g_device_.index();
+}
+
+FTensorAllocator *FTensorAllocator::find_allocator(int64_t group_id) {
+  std::lock_guard<std::mutex> lock(g_allocator_mutex_);
+  auto it = g_allocators_.find(group_id);
+  return it == g_allocators_.end() ? nullptr : it->second.get();
 }
 
 FTensorAllocator *FTensorAllocator::global_allocator(int64_t group_id) {
@@ -388,7 +403,8 @@ void FTensorAllocator::ensure_budget_locked_() {
   auto budget = GpuBudget::connect(
       physical_gpu_lock_path(resolve_device_index(dev_)) + ".budget-v2",
       [this] { return sample_budget_capacity_(); });
-  const auto slot = budget->register_pool(g_instance_name_, group_id_);
+  const auto slot = budget->register_pool(g_instance_name_, group_id_,
+                                          startup_policy_from_env());
   budget_slot_ = slot;
   budget_ = std::move(budget);
 }
@@ -406,14 +422,38 @@ uint64_t FTensorAllocator::available_physical_bytes() {
     return UINT64_MAX;
   const auto state = budget_->snapshot(
       budget_slot_, [this] { return sample_budget_capacity_(); });
-  const auto gpu_free = state.budget_bytes > state.charged_bytes
-                            ? state.budget_bytes - state.charged_bytes
-                            : 0;
+  // The same bound as grants: free memory above the watermark.
+  const auto usable = state.budget_bytes > state.watermark_bytes
+                          ? state.budget_bytes - state.watermark_bytes
+                          : 0;
+  const auto gpu_free =
+      usable > state.charged_bytes ? usable - state.charged_bytes : 0;
   const auto instance_free =
       state.instance_limit_bytes > state.instance_charged_bytes
           ? state.instance_limit_bytes - state.instance_charged_bytes
           : 0;
   return std::min(gpu_free, instance_free);
+}
+
+void FTensorAllocator::set_kv_demand(uint64_t bytes) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  ensure_budget_locked_();
+  if (budget_)
+    budget_->set_demand(budget_slot_, bytes);
+}
+
+void FTensorAllocator::set_kv_reclaimable(uint64_t empty, uint64_t cache,
+                                          uint64_t releasing) {
+  std::lock_guard<std::mutex> lock(mtx_);
+  ensure_budget_locked_();
+  if (budget_)
+    budget_->set_reclaimable(budget_slot_, empty, cache, releasing);
+}
+
+ReclaimPlan FTensorAllocator::kv_reclaim() {
+  std::lock_guard<std::mutex> lock(mtx_);
+  ensure_budget_locked_();
+  return budget_ ? budget_->reclaim_plan(budget_slot_) : ReclaimPlan{};
 }
 
 std::string FTensorAllocator::set_instance_budget_limit(uint64_t bytes,
@@ -486,6 +526,13 @@ bool FTensorAllocator::recalibrate_physical_budget() {
 bool FTensorAllocator::kv_tensors_created() {
   std::lock_guard<std::mutex> lock(mtx_);
   return num_layers_ > 0;
+}
+
+size_t FTensorAllocator::kv_mapping_page_size() {
+  std::lock_guard<std::mutex> lock(mtx_);
+  if (num_layers_ <= 0 || physical_bytes_per_offset_ == 0)
+    throw std::runtime_error("KV tensors must be initialized before mapping");
+  return contiguous_layout_ ? physical_bytes_per_offset_ : page_size_;
 }
 
 bool FTensorAllocator::map_to_kv_tensors(const std::vector<offset_t> &offsets) {
@@ -630,10 +677,11 @@ void FTensorAllocator::reserve_targets_(
           return;
         stats->required_bytes = required_bytes;
         stats->capacity_checks = 1;
+        const auto usable = state.budget_bytes > state.watermark_bytes
+                                ? state.budget_bytes - state.watermark_bytes
+                                : 0;
         const auto gpu_available =
-            state.budget_bytes > state.charged_bytes
-                ? state.budget_bytes - state.charged_bytes
-                : 0;
+            usable > state.charged_bytes ? usable - state.charged_bytes : 0;
         const auto instance_available =
             state.instance_limit_bytes > state.instance_charged_bytes
                 ? state.instance_limit_bytes - state.instance_charged_bytes

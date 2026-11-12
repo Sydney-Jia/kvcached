@@ -45,10 +45,12 @@ InternalPage::InternalPage(page_id_t id, int64_t size)
     : page_id(id), page_size(size), start_block(0), end_block(0),
       num_kv_blocks(0) {}
 
-void InternalPage::init(int64_t block_mem_size) {
+void InternalPage::init(int64_t block_mem_size, int64_t max_block_id) {
   auto range = get_block_range(page_id, page_size, block_mem_size);
-  start_block = range.first;
-  end_block = range.second;
+  start_block =
+      max_block_id < 0 ? range.first : std::min(range.first, max_block_id);
+  end_block =
+      max_block_id < 0 ? range.second : std::min(range.second, max_block_id);
   num_kv_blocks = end_block - start_block;
   free_list.clear();
   for (int64_t i = start_block; i < end_block; ++i) {
@@ -286,10 +288,16 @@ void PageAllocator::free_page(page_id_t page_id) {
 }
 
 void PageAllocator::free_pages(const std::vector<page_id_t> &page_ids) {
+  (void)free_pages_with_receipt(page_ids);
+}
+
+int64_t
+PageAllocator::free_pages_with_receipt(const std::vector<page_id_t> &page_ids) {
   throw_if_failed();
   auto start_time = std::chrono::steady_clock::now();
 
   std::vector<page_id_t> pages_to_unmap;
+  int64_t retained = 0;
 
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -305,12 +313,13 @@ void PageAllocator::free_pages(const std::vector<page_id_t> &page_ids) {
       reserved_page_list_.insert(reserved_page_list_.end(), page_ids.begin(),
                                  reserve_end);
 
+      retained = std::distance(page_ids.begin(), reserve_end);
       pages_to_unmap.assign(reserve_end, page_ids.end());
 
       if (pages_to_unmap.empty()) {
         update_memory_usage_unlocked();
         cond_.notify_all();
-        return;
+        return retained;
       }
     } else {
       pages_to_unmap = page_ids;
@@ -333,6 +342,7 @@ void PageAllocator::free_pages(const std::vector<page_id_t> &page_ids) {
       end_time - start_time);
   LOGGER(DEBUG, "free %ld pages cost %lu us", page_ids.size(),
          duration.count());
+  return retained;
 }
 
 bool PageAllocator::resize(int64_t new_mem_size) {
@@ -442,19 +452,23 @@ bool PageAllocator::resize(int64_t new_mem_size) {
   return true;
 }
 
-void PageAllocator::trim() {
+int64_t PageAllocator::trim(int64_t max_pages) {
   throw_if_failed();
   std::vector<page_id_t> pages_to_unmap;
 
   {
     std::lock_guard<std::mutex> lock(lock_);
-    pages_to_unmap.assign(reserved_page_list_.begin(),
+    const auto count = max_pages < 0 ? reserved_page_list_.size()
+                                     : std::min(reserved_page_list_.size(),
+                                                static_cast<size_t>(max_pages));
+    pages_to_unmap.assign(reserved_page_list_.end() - count,
                           reserved_page_list_.end());
-    reserved_page_list_.clear();
+    reserved_page_list_.erase(reserved_page_list_.end() - count,
+                              reserved_page_list_.end());
 
     if (pages_to_unmap.empty()) {
       update_memory_usage_unlocked();
-      return;
+      return 0;
     }
   }
 
@@ -467,11 +481,46 @@ void PageAllocator::trim() {
                            pages_to_unmap.end());
     update_memory_usage_unlocked();
   }
+  return static_cast<int64_t>(pages_to_unmap.size());
 }
 
 int64_t PageAllocator::get_num_free_pages() const {
   throw_if_failed();
   return num_free_pages_.load(std::memory_order_relaxed);
+}
+
+int64_t
+PageAllocator::get_allocatable_block_capacity(int64_t block_mem_size,
+                                              int64_t new_page_limit,
+                                              int64_t max_block_id) const {
+  if (block_mem_size <= 0) {
+    throw std::invalid_argument("block_mem_size must be positive");
+  }
+  throw_if_failed();
+  std::lock_guard<std::mutex> lock(lock_);
+  if (transaction_failed_.load(std::memory_order_acquire)) {
+    throw StateConsistencyError(transaction_error_);
+  }
+  int64_t capacity = 0;
+  auto add_page = [&](page_id_t page_id) {
+    const auto range =
+        InternalPage::get_block_range(page_id, page_size_, block_mem_size);
+    const int64_t start =
+        max_block_id < 0 ? range.first : std::min(range.first, max_block_id);
+    const int64_t end =
+        max_block_id < 0 ? range.second : std::min(range.second, max_block_id);
+    capacity += end - start;
+  };
+  for (page_id_t page_id : reserved_page_list_) {
+    add_page(page_id);
+  }
+  const auto count =
+      std::min(free_page_list_.size(),
+               static_cast<size_t>(std::max<int64_t>(0, new_page_limit)));
+  for (size_t i = 0; i < count; ++i) {
+    add_page(free_page_list_[i]);
+  }
+  return capacity;
 }
 
 int64_t PageAllocator::get_num_inuse_pages() const {
@@ -540,9 +589,22 @@ PageState PageAllocator::get_page_state_unlocked() const {
 }
 
 int64_t PageAllocator::get_avail_physical_pages() const {
+  const int previous_device = gpu_vmm::current_device();
+  const int pool_device = FTensorAllocator::device_index();
+  const bool change_device = pool_device >= 0 && previous_device != pool_device;
+  if (change_device) {
+    CHECK_GPU(gpu_vmm::set_device(pool_device));
+  }
   size_t avail_phy_mem_size = 0, total_phy_mem_size = 0;
-  CHECK_GPU(device_mem_info(gpu_vmm::current_device(), &avail_phy_mem_size,
-                            &total_phy_mem_size));
+  const auto status =
+      device_mem_info(pool_device >= 0 ? pool_device : previous_device,
+                      &avail_phy_mem_size, &total_phy_mem_size);
+  // Restore the caller's device even when the query reports an error, then
+  // preserve the existing fatal runtime-error contract.
+  if (change_device) {
+    CHECK_GPU(gpu_vmm::set_device(previous_device));
+  }
+  CHECK_GPU(status);
 
   const size_t headroom =
       static_cast<size_t>(total_phy_mem_size * (1.0 - gpu_utilization_));
@@ -552,8 +614,8 @@ int64_t PageAllocator::get_avail_physical_pages() const {
   // Worker-IPC allocators own their ledgers in the workers, not this process.
   // This remains an estimate; the actual map still performs atomic admission.
   if (world_size_ == 1 && !should_use_worker_ipc()) {
-    auto allocator = FTensorAllocator::global_allocator(group_id_);
-    if (allocator->kv_tensors_created())
+    auto allocator = FTensorAllocator::find_allocator(group_id_);
+    if (allocator != nullptr && allocator->kv_tensors_created())
       usable_phy_mem_size =
           std::min(usable_phy_mem_size, allocator->available_physical_bytes());
   }
