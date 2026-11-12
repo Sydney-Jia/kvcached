@@ -142,16 +142,29 @@ class NativeElasticWorker(NPUWorker):
         print('KVCACHED_GENERIC_LAYOUT ' + json.dumps(self._native_status()), flush=True)
 
     def execute_model(self, scheduler_output):
+        return self._call_traced('execute', self._execute_with_residency, scheduler_output)
+
+    def execute_dummy_batch(self):
+        # Idle DP participation bypasses execute_model at the worker boundary.
+        return self._call_traced('dummy-batch', super().execute_dummy_batch)
+
+    def sample_tokens(self, grammar_output):
+        # Native sampling may also launch speculative forwards/collectives.
+        return self._call_traced('sample', super().sample_tokens, grammar_output)
+
+    def _call_traced(self, phase, function, *args):
         # Opt-in diagnostics distinguish a CPU-side residency fence from a
         # native collective stall. They must not change the execution policy.
+        self._trace_residency(phase + '-call')
         if self.native_trace_residency:
             import faulthandler
             faulthandler.dump_traceback_later(45, repeat=False)
         try:
-            return self._execute_with_residency(scheduler_output)
+            return function(*args)
         finally:
             if self.native_trace_residency:
                 faulthandler.cancel_dump_traceback_later()
+            self._trace_residency(phase + '-finished')
 
     def _trace_residency(self, phase, **extra):
         if self.native_trace_residency:
