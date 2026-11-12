@@ -42,6 +42,22 @@ class NativeElasticWorker(NPUWorker):
         self.native_epoch = 0
         self.native_elastic = False
         self.native_steps = 0
+        self.native_graph_replays = 0
+        self.native_graph_captures = 0
+        if os.getenv('KVCACHED_TRACE_GRAPHS') == '1':
+            # Validation instrumentation only; count real native API calls,
+            # not configuration flags. Compare before/after-request counters
+            # to separate startup warmups from serving replays.
+            for method, counter in (('replay', 'native_graph_replays'),
+                                    ('__init__', 'native_graph_captures')):
+                original = getattr(torch.npu.NPUGraph, method)
+
+                def traced(graph, *args, _original=original, _counter=counter, **kwargs):
+                    result = _original(graph, *args, **kwargs)
+                    setattr(self, _counter, getattr(self, _counter) + 1)
+                    return result
+
+                setattr(torch.npu.NPUGraph, method, traced)
 
     def initialize_from_config(self, kv_cache_config):
         from kvcached import vmm_ops
@@ -118,6 +134,9 @@ class NativeElasticWorker(NPUWorker):
                     epoch=self.native_epoch, steps=self.native_steps,
                     rank=self.rank, dp_rank=self.vllm_config.parallel_config.data_parallel_rank,
                     pid=os.getpid(), device=str(self.device), groups=len(layout.groups),
+                    graph_replays=self.native_graph_replays, graph_captures=self.native_graph_captures,
+                    physical_device=arena.operations.current_device_pci_bus_id(),
+                    physical_budget=dict(arena.operations.physical_budget_state()),
                     group_blocks=layout.block_counts, spans=len(layout.spans),
                     base_addresses={key: raw.data_ptr() for key, raw in arena.raw.items()},
                     owners=self.native_owners.snapshot())
