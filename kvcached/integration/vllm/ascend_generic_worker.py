@@ -16,6 +16,7 @@ import torch
 from vllm_ascend.worker.worker import NPUWorker
 
 from kvcached.integration.vllm.native_storage import NativeByteAllocation, NativeStorageArena
+from kvcached.integration.vllm.native_residency import dummy_state_owners
 from kvcached.residency import ResidencyOwners
 
 
@@ -104,6 +105,20 @@ class NativeElasticWorker(NPUWorker):
         if allocations != 1 or not arena.raw or self.native_owners is None:
             raise RuntimeError("Native storage hook did not materialize a validated layout")
         self.native_arena = arena
+        prepare_dummy = self.model_runner.prepare_dummy_attn
+
+        @wraps(prepare_dummy)
+        def prepare_owned_dummy(input_batch, *args, **kwargs):
+            # Idle DP ranks also execute forwards. Native preparation may write
+            # state slots before launching attention, so backing is needed here,
+            # not only when a real request enters the scheduler's block table.
+            blocks = dummy_state_owners(self.native_owners.layout.block_counts,
+                                        input_batch.num_reqs)
+            self.native_owners.replace({'runtime-dummy': blocks})
+            self.native_arena.residency.ensure(self.native_owners.required_pages())
+            return prepare_dummy(input_batch, *args, **kwargs)
+
+        self.model_runner.prepare_dummy_attn = prepare_owned_dummy
         torch.npu.synchronize()
         print('KVCACHED_GENERIC_LAYOUT ' + json.dumps(self._native_status()), flush=True)
 
@@ -117,7 +132,7 @@ class NativeElasticWorker(NPUWorker):
         if (snapshot.epoch != self.native_epoch + 1 or snapshot.num_groups != len(layout.groups)
                 or set(layout.block_counts.values()) != {snapshot.num_blocks}):
             raise ValueError("Native ownership epoch or layout identity changed")
-        self.native_owners.replace(snapshot.owners)
+        self.native_owners.replace({**snapshot.owners, 'runtime-dummy': ()})
         if self.native_mapped_revision != self.native_owners.revision:
             required = self.native_owners.required_pages()
             self.native_arena.residency.ensure(required)

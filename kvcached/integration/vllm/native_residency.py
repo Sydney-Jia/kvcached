@@ -21,6 +21,22 @@ class NativeOwnership:
     owners: dict[str, tuple[tuple[int, int], ...]]
 
 
+def dummy_state_owners(block_counts, num_requests):
+    """Conservative native MRV2 dummy-slot contract, independent of cache type.
+
+    Null/padding uses slot zero; stateful dummy requests may use 1..N.
+    Protect these slots in every group before native metadata preparation,
+    which can itself zero state. The execution fence, not Python return,
+    determines when a later scheduler step may retire the backing pages.
+    """
+    if type(num_requests) is not int or num_requests < 0:
+        raise ValueError("Dummy request count must be a nonnegative integer")
+    if not block_counts or any(num_requests >= count for count in block_counts.values()):
+        raise ValueError("Dummy state slots exceed native cache capacity")
+    return tuple((group, block) for group in block_counts
+                 for block in range(num_requests + 1))
+
+
 def snapshot_ownership(coordinator, output, *, epoch: int,
                        decode_group: Callable) -> NativeOwnership:
     managers = tuple(coordinator.single_type_managers)

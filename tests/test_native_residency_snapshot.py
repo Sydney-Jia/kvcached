@@ -16,6 +16,16 @@ spec.loader.exec_module(module)
 
 
 class OwnershipTest(unittest.TestCase):
+    def test_dummy_slots_cover_every_native_group(self):
+        # An idle DP rank has no request table, but its native dummy forward
+        # may read/write real state slots. Include null and live dummy slots.
+        self.assertEqual(module.dummy_state_owners({0: 8, 1: 8}, 2),
+                         ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)))
+        self.assertEqual(module.dummy_state_owners({0: 8}, 0), ((0, 0),))
+        for count in (-1, True, 8):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                module.dummy_state_owners({0: 8}, count)
+
     def fixture(self):
         blocks = [NS(block_id=i, ref_cnt=0, block_hash=None, is_null=i == 0)
                   for i in range(8)]
