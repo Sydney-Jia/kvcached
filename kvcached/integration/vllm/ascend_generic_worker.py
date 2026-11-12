@@ -67,6 +67,20 @@ class NativeElasticWorker(NPUWorker):
 
         if self.native_arena is not None:
             raise RuntimeError("Persistent elastic cache cannot be initialized twice")
+        # Profiling populated PyTorch's caching allocator. Native KV tensors
+        # could reuse its free arenas, whereas a separate VMM allocator cannot.
+        # Return only unused allocator storage before sizing the VMM budget;
+        # keep this startup transfer distinct from later KV reclamation.
+        torch.npu.synchronize()
+        before = dict(zip(('free', 'total'), torch.npu.mem_get_info()))
+        before.update(allocated=torch.npu.memory_allocated(),
+                      reserved=torch.npu.memory_reserved())
+        torch.npu.empty_cache()
+        after = dict(zip(('free', 'total'), torch.npu.mem_get_info()))
+        after.update(allocated=torch.npu.memory_allocated(),
+                     reserved=torch.npu.memory_reserved())
+        print('KVCACHED_NATIVE_ALLOCATOR_HANDOFF ' + json.dumps(
+            dict(rank=self.rank, before=before, after=after)), flush=True)
         arena = NativeStorageArena(self.device, vmm_ops, torch.npu.synchronize)
         allocate = attn_utils._allocate_kv_cache
         reshape = attn_utils._reshape_kv_cache_v2
