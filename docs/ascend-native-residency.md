@@ -92,6 +92,11 @@ control RPC is intended for controlled validation, not a public service API.
 calls. Compare counters before and after serving requests: capture settings
 alone, or startup warmup replay counts, do not prove serving uses graphs.
 
+`KVCACHED_TRACE_RESIDENCY=1` additionally logs each rank's residency, dummy
+preparation and execution phases, with a Python stack dump if one worker call
+lasts more than 45 seconds. This opt-in diagnostic changes neither the page
+policy nor collective synchronization. Disable it for latency comparisons.
+
 ## Current boundaries
 
 - Native buffers must expose the validated raw byte-allocation and block-first

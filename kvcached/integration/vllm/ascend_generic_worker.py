@@ -46,6 +46,7 @@ class NativeElasticWorker(NPUWorker):
         self.native_mapped_revision = -1
         self.native_graph_replays = 0
         self.native_graph_captures = 0
+        self.native_trace_residency = os.getenv('KVCACHED_TRACE_RESIDENCY') == '1'
         if os.getenv('KVCACHED_TRACE_GRAPHS') == '1':
             # Validation instrumentation only; count real native API calls,
             # not configuration flags. Compare before/after-request counters
@@ -81,7 +82,7 @@ class NativeElasticWorker(NPUWorker):
                      reserved=torch.npu.memory_reserved())
         print('KVCACHED_NATIVE_ALLOCATOR_HANDOFF ' + json.dumps(
             dict(rank=self.rank, before=before, after=after)), flush=True)
-        arena = NativeStorageArena(self.device, vmm_ops, torch.npu.synchronize)
+        arena = NativeStorageArena(self.device, vmm_ops, self._residency_fence)
         allocate = attn_utils._allocate_kv_cache
         reshape = attn_utils._reshape_kv_cache_v2
         allocations = 0
@@ -126,17 +127,47 @@ class NativeElasticWorker(NPUWorker):
             # Idle DP ranks also execute forwards. Native preparation may write
             # state slots before launching attention, so backing is needed here,
             # not only when a real request enters the scheduler's block table.
+            self._trace_residency('dummy-prepare', num_requests=input_batch.num_reqs)
             blocks = dummy_state_owners(self.native_owners.layout.block_counts,
                                         input_batch.num_reqs)
             self.native_owners.replace({'runtime-dummy': blocks})
             self.native_arena.residency.ensure(self.native_owners.required_pages())
-            return prepare_dummy(input_batch, *args, **kwargs)
+            self._trace_residency('dummy-backed')
+            result = prepare_dummy(input_batch, *args, **kwargs)
+            self._trace_residency('dummy-ready')
+            return result
 
         self.model_runner.prepare_dummy_attn = prepare_owned_dummy
         torch.npu.synchronize()
         print('KVCACHED_GENERIC_LAYOUT ' + json.dumps(self._native_status()), flush=True)
 
     def execute_model(self, scheduler_output):
+        # Opt-in diagnostics distinguish a CPU-side residency fence from a
+        # native collective stall. They must not change the execution policy.
+        if self.native_trace_residency:
+            import faulthandler
+            faulthandler.dump_traceback_later(45, repeat=False)
+        try:
+            return self._execute_with_residency(scheduler_output)
+        finally:
+            if self.native_trace_residency:
+                faulthandler.cancel_dump_traceback_later()
+
+    def _trace_residency(self, phase, **extra):
+        if self.native_trace_residency:
+            print('KVCACHED_RESIDENCY_TRACE ' + json.dumps(dict(
+                phase=phase, timestamp=time.time(), rank=self.rank,
+                dp_rank=self.vllm_config.parallel_config.data_parallel_rank,
+                pid=os.getpid(), epoch=self.native_epoch, **extra)), flush=True)
+
+    def _residency_fence(self):
+        self._trace_residency('fence-enter')
+        torch.npu.synchronize()
+        self._trace_residency('fence-complete')
+
+    def _execute_with_residency(self, scheduler_output):
+        self._trace_residency('step-enter',
+                              scheduled_tokens=scheduler_output.total_num_scheduled_tokens)
         if self.native_arena is None:
             raise RuntimeError("Native residency is not initialized")
         snapshot = getattr(scheduler_output, 'kvcached_ownership', None)
@@ -149,15 +180,21 @@ class NativeElasticWorker(NPUWorker):
         self.native_owners.replace({**snapshot.owners, 'runtime-dummy': ()})
         if self.native_mapped_revision != self.native_owners.revision:
             required = self.native_owners.required_pages()
+            self._trace_residency('ensure-enter')
             self.native_arena.residency.ensure(required)
+            self._trace_residency('ensure-complete')
             if self.native_elastic:
                 # Full device completion fences all streams, including graph-update
                 # and state-copy streams. Optimize only after event coverage proof.
                 self.native_arena.residency.reclaim(required)
+                self._trace_residency('reclaim-complete')
             self.native_mapped_revision = self.native_owners.revision
         self.native_epoch = snapshot.epoch
         self.native_steps += 1
-        return super().execute_model(scheduler_output)
+        self._trace_residency('native-execute-enter')
+        result = super().execute_model(scheduler_output)
+        self._trace_residency('native-execute-return')
+        return result
 
     def _native_status(self):
         arena = self.native_arena
