@@ -8,6 +8,8 @@ tensor layout or replace the native cache manager with a model-specific pool.
 The [2026-11-12 checkpoint](ascend-native-checkpoint-20261112.md) records the
 shared-build Qwen/DeepSeek, graph, physical borrowing and failure evidence,
 including measured overhead and unresolved boundaries.
+The [development policy](ascend-development.md) identifies the single integration
+line, frozen prototypes and contract-based experiments.
 
 ## Responsibilities
 

@@ -65,6 +65,9 @@ remaining gaps, and the [probe guide](tests/ascend/README.md) for test entry poi
 The separate [native V2 residency adapter](docs/ascend-native-residency.md)
 preserves native multi-group layouts and ownership. It uses explicit worker
 and scheduler entry points rather than the legacy automatic patch path.
+Ascend work converges on `feat/ascend-generic-kv`; see the
+[development line and experiment policy](docs/ascend-development.md).
+Model names identify test cases, not permanent implementation branches.
 
 | Engine | Versions | Attention types | Example models |
 |--------|----------|-----------------|----------------|
