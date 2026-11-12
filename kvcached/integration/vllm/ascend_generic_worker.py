@@ -163,6 +163,7 @@ class NativeElasticWorker(NPUWorker):
         arena = self.native_arena
         layout = self.native_owners.layout
         return dict(arena.residency.status(), elastic=self.native_elastic,
+                    instance_name=arena.instance_name,
                     epoch=self.native_epoch, steps=self.native_steps,
                     rank=self.rank, dp_rank=self.vllm_config.parallel_config.data_parallel_rank,
                     pid=os.getpid(), device=str(self.device), groups=len(layout.groups),

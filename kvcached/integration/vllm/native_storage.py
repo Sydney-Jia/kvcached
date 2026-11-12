@@ -8,6 +8,7 @@ views. Explicit metadata validation follows allocation before elastic use.
 """
 
 import os
+from uuid import uuid4
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -22,6 +23,9 @@ class NativeStorageArena:
         self.device = torch.device(device)
         self.operations = operations
         self.page_bytes = page_bytes
+        # Container PID namespaces can assign identical PIDs to independent
+        # engines sharing this physical device and budget file.
+        self.instance_name = f'native-residency-{os.getpid()}-{uuid4().hex}'
         self.raw = {}
         self.residency = PhysicalResidency(
             operations, synchronize, self._initialize,
@@ -42,7 +46,7 @@ class NativeStorageArena:
     def allocate(self, size):
         if not self._initialized:
             self.operations.init_kvcached(str(self.device), self.page_bytes, False,
-                                          f'native-residency-{os.getpid()}')
+                                          self.instance_name)
             self._initialized = True
         pool_id = len(self.raw)
         storage = Storage(str(pool_id), int(size), self.page_bytes)

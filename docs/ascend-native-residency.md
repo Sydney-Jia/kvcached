@@ -20,9 +20,29 @@ The block table continues to contain native cache slots. It does not become a
 device page table. Virtual addresses remain stable across physical retirement
 and restoration; tensor views and attention kernels retain their native ABI.
 
+Ascend device UUIDs observed on the test A5 host are shared by separately
+budgeted devices. The backend key therefore combines the UUID with the
+runtime-resolved physical device ID. Using either the UUID alone or a local
+visible index would respectively merge different HBM pools or split one pool
+across processes. The explicit user-to-physical API is documented by
+[CANN](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/920beta1/API/runtimeapi/aclcppdevg_03_2286.html).
+The opt-in `test_physical_keys_are_distinct_and_visibility_stable` checks this
+contract against the compiled extension on the selected devices.
+
+The earlier native-hybrid prototype supplied the physical-identity fix and
+its hardware test. Its native ND storage requirement is implemented directly
+in `csrc/ascend_tensor.cpp` using torch_npu's tensor factory; a separate
+model-specific storage wrapper is no longer needed. Per-DP control logging,
+completed-transition timing and separate PyTorch allocator trimming are also
+retained. The old model-specific layout and ownership entry points are not
+used by this adapter.
+
 ## Lifecycle
 
-1. Allocate and map the complete native backing during initialization. Native
+1. After profiling, synchronize and return unused PyTorch allocator arenas.
+   The independent VMM allocator cannot reuse cached PyTorch allocations.
+   Record this startup handoff separately from later KV reclamation.
+   Allocate and map the complete native backing during initialization. Native
    view construction, warmup and graph capture run against valid storage.
 2. After each native scheduling decision, publish owners for **all** requests,
    not just requests scheduled in that iteration. Cached prefixes with zero
