@@ -1,0 +1,20 @@
+{
+  "services": {
+    "a": {"url": "http://127.0.0.1:18470", "model": "model-a", "control": "native-residency", "control_results": 1},
+    "b": {"url": "http://127.0.0.1:18471", "model": "model-b", "control": "native-residency", "control_results": 1}
+  },
+  "cases": {
+    "count1": {"payload": {"messages": [{"role": "user", "content": "Output only the integers 11 through 20 separated by spaces. No explanation."}], "max_tokens": 96, "temperature": 0}, "expected_numbers": [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]},
+    "count2": {"payload": {"messages": [{"role": "user", "content": "Output only the integers 31 through 40 separated by spaces. No explanation."}], "max_tokens": 96, "temperature": 0}, "expected_numbers": [31, 32, 33, 34, 35, 36, 37, 38, 39, 40]}
+  },
+  "phases": [
+    {"name": "a-burst", "duration_s": 10, "rates": {"a": 0.5, "b": 0.1}, "cases": {"a": ["count1", "count2"], "b": ["count2", "count1"]}},
+    {"name": "b-burst", "duration_s": 10, "rates": {"a": 0.1, "b": 0.5}, "cases": {"a": ["count1", "count2"], "b": ["count2", "count1"]}}
+  ],
+  "events": [
+    {"at_s": 2, "service": "b", "action": "elastic"},
+    {"at_s": 9, "service": "b", "action": "held"},
+    {"at_s": 12, "service": "a", "action": "elastic"},
+    {"at_s": 19, "service": "a", "action": "held"}
+  ]
+}

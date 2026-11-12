@@ -52,6 +52,12 @@ as if they were unit tests.
 
 ## Evidence rules
 
+The migrated [native-residency burst protocol](../../docs/ascend-service-burst.md)
+connects to existing services with a configuration-driven offered trace. Run its
+CPU checks with `python -m unittest tests.test_service_burst_control`. The old
+deployment/quota implementation and measurements remain under
+`archive/ascend-service-burst-20261105`.
+
 1. Verify current device health and process ownership before starting. Invalidate
    comparisons contaminated by foreign device work; stop only the experiment's
    own tasks. A visible device is not a reservation.

@@ -64,6 +64,41 @@ def native():
     vmm_ops.shutdown_kvcached()
 
 
+def test_native_nd_fp8_views_survive_partial_retirement(native):
+    """Migrated native-storage invariant, using the mainline tensor factory.
+
+    The old _npu_storage wrapper is deliberately not restored. Both raw tensors
+    and dtype views must already carry valid native ND metadata at creation.
+    """
+    import gc
+    import torch_npu
+
+    torch, vmm = native
+    page = 2 * 1024**2
+    vmm.init_kvcached('npu:0', page, False, f'native-nd-test-{os.getpid()}')
+    tensor = vmm.create_kv_tensors(4*page, 1, 'npu:0', 1, 1, 0, True, page)[0]
+    address = tensor.data_ptr()
+    assert torch_npu.get_npu_format(tensor) == 2
+    fp8 = tensor.view(torch.float8_e4m3fn)
+    assert torch_npu.get_npu_format(fp8) == 2
+    assert fp8.data_ptr() == address
+    alias = tensor.view(torch.uint8)
+    del tensor
+    gc.collect()
+    assert alias.data_ptr() == address
+    assert vmm.map_to_kv_tensors([0, page], 0)
+    alias[:32].fill_(23)
+    alias[page:page+32].fill_(37)
+    torch.npu.synchronize()
+    assert vmm.unmap_from_kv_tensors([0], 0)
+    assert alias[page:page+32].cpu().tolist() == [37]*32
+    assert vmm.map_to_kv_tensors([0], 0)
+    alias[:32].fill_(41)
+    torch.npu.synchronize()
+    assert alias[:32].cpu().tolist() == [41]*32
+    assert fp8.data_ptr() == alias.data_ptr() == address
+
+
 @pytest.mark.parametrize("contiguous,buffers", [(False, 1), (False, 2), (True, 1), (True, 2)])
 def test_partial_reclaim_preserves_live_pages_and_virtual_addresses(native, contiguous, buffers):
     torch, vmm = native

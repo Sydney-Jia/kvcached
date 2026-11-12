@@ -69,9 +69,34 @@ class OwnershipTest(unittest.TestCase):
         coordinator.block_pool.blocks[2].block_hash = (3, "invalid-group")
         with self.assertRaises(ValueError):
             module.snapshot_ownership(coordinator, output, epoch=1, decode_group=lambda k: k[0])
+        coordinator.block_pool.blocks[2].block_hash = None
         coordinator.single_type_managers[1].block_pool = object()
         with self.assertRaises(ValueError):
             module.snapshot_ownership(coordinator, output, epoch=1, decode_group=lambda k: k[0])
+
+    def test_authoritative_replacement_and_preemption_preserve_other_requests(self):
+        # Migrated from the older NativeLiveBlocks delta-update tests. The new
+        # adapter reads authoritative managers instead of replaying append or
+        # replacement fields, so stale scheduler deltas cannot retain old IDs.
+        coordinator, output = self.fixture()
+        pool = coordinator.block_pool
+        left, right = coordinator.single_type_managers[:2]
+        left.req_to_blocks = {'a': [pool.blocks[1]], 'unscheduled': [pool.blocks[6]]}
+        right.req_to_blocks = {'a': [pool.blocks[2]]}
+        first = module.snapshot_ownership(coordinator, output, epoch=1, decode_group=lambda k: k[0])
+        self.assertEqual(first.owners['requests'], ((0, 1), (0, 6), (1, 2)))
+        left.req_to_blocks['a'] = [pool.blocks[3]]
+        right.req_to_blocks['a'] = [pool.blocks[4]]
+        output.block_table_updates = {'a': ([1], [2], [])}  # Old, irrelevant delta.
+        replaced = module.snapshot_ownership(coordinator, output, epoch=2, decode_group=lambda k: k[0])
+        self.assertEqual(replaced.owners['requests'], ((0, 3), (0, 6), (1, 4)))
+        del left.req_to_blocks['a']
+        del right.req_to_blocks['a']
+        pool.blocks[4].block_hash = (1, 'retained-prefix')
+        retired = module.snapshot_ownership(coordinator, output, epoch=3, decode_group=lambda k: k[0])
+        self.assertEqual(retired.owners['requests'], ((0, 6),))
+        self.assertEqual(retired.owners['prefix'], ((1, 4),))
+        self.assertEqual(first.owners['requests'], ((0, 1), (0, 6), (1, 2)))
 
 
 if __name__ == "__main__":
