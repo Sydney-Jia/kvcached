@@ -78,6 +78,45 @@ class PhysicalTest(unittest.TestCase):
         self.assertEqual(self.memory.data[0], {0: 0, 16: 'live state'})
         self.assertEqual(self.pool.status()['mapped_bytes'], 48)
 
+    def test_transition_reuses_capacity_without_double_backing(self):
+        self.pool.ensure({'0': {0, 16}, '1': set()})
+        self.memory.data[0][0] = 'live'
+        original_map = self.memory.map_to_kv_tensors_with_result
+
+        def bounded_map(pages, pool):
+            occupied = sum(len(p) for p in self.memory.data.values())
+            if occupied + len(pages) > 2:
+                raise RuntimeError('capacity_exhausted: two pages only')
+            return original_map(pages, pool)
+
+        self.memory.map_to_kv_tensors_with_result = bounded_map
+        required = {'0': {0}, '1': {32}}
+        with self.assertRaisesRegex(RuntimeError, 'capacity_exhausted'):
+            self.pool.ensure(required)
+        change = self.pool.transition(required)
+        self.assertEqual(change, {'reclaimed_bytes': 16, 'grown_bytes': 16})
+        self.assertEqual(self.memory.data, {0: {0: 'live'}, 1: {32: 0}})
+
+    def test_transition_growth_miss_preserves_required_live_data(self):
+        self.pool.ensure({'0': {0, 16}, '1': set()})
+        self.memory.data[0][0] = 'live'
+        self.memory.fail_map = 1
+        with self.assertRaises(MemoryError):
+            self.pool.transition({'0': {0}, '1': {32}})
+        self.assertEqual(self.memory.data, {0: {0: 'live'}, 1: {}})
+        self.assertFalse(self.pool.poisoned)
+        self.memory.fail_map = None
+        self.pool.transition({'0': {0}, '1': {32}})
+        self.assertEqual(self.memory.data[0][0], 'live')
+
+    def test_transition_invalid_target_cannot_retire_anything(self):
+        self.pool.ensure(self.pool.full())
+        before = {key: dict(pages) for key, pages in self.memory.data.items()}
+        with self.assertRaises(ValueError):
+            self.pool.transition({'0': {0}, '1': {17}})
+        self.assertEqual(self.memory.data, before)
+        self.assertEqual(self.memory.log, [])
+
     def test_partial_growth_failure_rolls_back_only_new_pages(self):
         self.pool.ensure({'0': {0}, '1': {0}})
         self.memory.data[0][0] = 'live'

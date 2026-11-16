@@ -21,10 +21,12 @@ from kvcached.residency import Layout, Storage, block_first_spans
 
 
 class NativeStorageArena:
-    def __init__(self, device, operations, synchronize, page_bytes=2 * 1024 * 1024):
+    def __init__(self, device, operations, synchronize, page_bytes=2 * 1024 * 1024,
+                 *, lazy=False):
         self.device = torch.device(device)
         self.operations = operations
         self.page_bytes = page_bytes
+        self.lazy = lazy
         # Container PID namespaces can assign identical PIDs to independent
         # engines sharing this physical device and budget file.
         self.instance_name = f'native-residency-{os.getpid()}-{uuid4().hex}'
@@ -62,6 +64,13 @@ class NativeStorageArena:
             self.residency, desired, self._release_unused_allocator,
             self._allocator_snapshot, self._report_capacity_relief)
 
+    def transition(self, desired):
+        # Validation and the device fence happen before retirement. Preserve
+        # allocator relief for clean growth failures after unowned pages retire.
+        reclaimed = self.residency.reclaim(desired)
+        grown = self.ensure(desired)
+        return dict(reclaimed_bytes=reclaimed, grown_bytes=grown)
+
     def _initialize(self, key, pages):
         storage = self.residency.storages[key]
         runs = []
@@ -87,7 +96,8 @@ class NativeStorageArena:
             raise RuntimeError("Raw storage factory must return exactly one byte tensor")
         self.raw[storage.key] = tensors[0][:storage.size_bytes]
         self.residency.register(storage, pool_id)
-        self.ensure(self.residency.full())
+        if not self.lazy:
+            self.ensure(self.residency.full())
         return self.raw[storage.key]
 
     def find_storage(self, tensor):
@@ -119,11 +129,49 @@ class NativeStorageArena:
         return Layout(self.residency.storages.values(), spans)
 
 
-class NativeByteAllocation(TorchDispatchMode):
+class NativeMetadataViews(TorchDispatchMode):
+    """Reject data access while lazy native allocations are being reshaped.
+
+    An unfamiliar native reshape must fail before a copy/convert kernel reads
+    unbacked addresses. Tensor storage/layout validation follows these views.
+    This list is an engine interface contract, never a model-name allowlist.
+    """
+
+    _metadata_ops = frozenset((
+        'aten.view.default', 'aten.view.dtype', 'aten._unsafe_view.default',
+        'aten.as_strided.default', 'aten.slice.Tensor', 'aten.select.int',
+        'aten.transpose.int', 'aten.permute.default', 'aten.alias.default',
+        'aten.detach.default', 'aten.squeeze.default', 'aten.squeeze.dim',
+        'aten.squeeze.dims', 'aten.unsqueeze.default', 'aten.expand.default',
+        'aten.split.Tensor', 'aten.split_with_sizes.default', 'aten.unbind.int',
+    ))
+
     def __init__(self, arena):
         super().__init__()
         self.arena = arena
 
+    def _uses_native_storage(self, value):
+        if isinstance(value, torch.Tensor):
+            if value.device != self.arena.device:
+                return False
+            address = value.untyped_storage().data_ptr()
+            return any(address == raw.untyped_storage().data_ptr()
+                       for raw in self.arena.raw.values())
+        if isinstance(value, dict):
+            return any(self._uses_native_storage(item) for item in value.values())
+        if isinstance(value, (tuple, list)):
+            return any(self._uses_native_storage(item) for item in value)
+        return False
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if (self.arena.lazy and str(func) not in self._metadata_ops
+                and self._uses_native_storage((args, kwargs))):
+            raise ValueError(f'Lazy native layout requires a metadata-only view; got {func}')
+        return func(*args, **kwargs)
+
+
+class NativeByteAllocation(NativeMetadataViews):
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
         if func == torch.ops.aten.zeros.default:
@@ -134,4 +182,4 @@ class NativeByteAllocation(TorchDispatchMode):
                         or device != self.arena.device):
                     raise ValueError("Native KV allocator changed its raw byte-buffer contract")
                 return self.arena.allocate(shape[0])
-        return func(*args, **kwargs)
+        return super().__torch_dispatch__(func, types, args, kwargs)

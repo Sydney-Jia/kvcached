@@ -144,7 +144,7 @@ class ControlResponseTest(unittest.TestCase):
         self.call = namespace['kvcached_native_control']
         self.arena = NS(residency=NS(poisoned=False, full=lambda: {'0': {0}}, reclaim=Mock(return_value=0)),
                         ensure=Mock(), capacity_relief_attempts=1, last_capacity_relief={})
-        self.worker = NS(native_arena=self.arena, native_elastic=True,
+        self.worker = NS(native_arena=self.arena, native_elastic=True, native_capacity_enabled=False,
                          _native_status=lambda: dict(poisoned=self.arena.residency.poisoned))
 
     def test_rejected_restore_is_normal_reply_and_next_status_is_readable(self):
@@ -164,6 +164,14 @@ class ControlResponseTest(unittest.TestCase):
         self.arena.ensure.side_effect = RuntimeError('capacity_exhausted: quarantined')
         with self.assertRaises(RuntimeError):
             self.call(self.worker, 'held')
+
+    def test_capacity_mode_cannot_bypass_budget_with_held_rpc(self):
+        self.worker.native_capacity_enabled = True
+        response = self.call(self.worker, 'held')
+        self.assertFalse(response['ok'])
+        self.assertIn('held_disabled', response['rejection'])
+        self.arena.ensure.assert_not_called()
+        self.assertTrue(self.worker.native_elastic)
 
 
 if __name__ == '__main__':

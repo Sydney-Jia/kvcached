@@ -132,6 +132,20 @@ class PhysicalResidency:
         self.reclaimed_bytes += total
         return total
 
+    def transition(self, required):
+        """Retire unowned pages before growth, without transient double backing.
+
+        The caller supplies *all* current owners, including copy endpoints and
+        in-flight users. reclaim() fences prior device work before releasing
+        anything. A failed growth leaves retained contents intact and rolls
+        back only newly mapped pages; retired, unowned contents are not restored.
+        This is not an atomic device-wide or cross-rank transaction.
+        """
+        required = self._validate(required)
+        retired = self.reclaim(required)
+        grown = self.ensure(required)
+        return {"reclaimed_bytes": retired, "grown_bytes": grown}
+
     def status(self):
         return {"poisoned": self.poisoned,
                 "reserved_bytes": sum(s.reservation_bytes for s in self.storages.values()),

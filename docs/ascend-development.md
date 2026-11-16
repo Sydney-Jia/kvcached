@@ -1,9 +1,15 @@
 # Ascend development line and experiments
 
-Updated: 2026-11-12. The single Ascend development line in this fork is
+Updated: 2026-11-16. The single Ascend development line in this fork is
 `feat/ascend-generic-kv`. The fork's `main` remains the upstream baseline;
 its name does not make it the Ascend deployment source. Use fixed commits for
 releases and retain the [acceptance checkpoint](ascend-native-checkpoint-20261112.md).
+
+The [native capacity closure candidate](ascend-native-capacity.md) is now being
+implemented directly on this general development line, behind an explicit
+opt-in. It adds lazy native backing, synchronous all-rank admission, prefix
+policy and revisioned control. CPU regression is recorded separately; candidate
+NPU/model/graph acceptance is pending. No model-specific branch was introduced.
 
 ## One mechanism, explicit contracts
 
@@ -80,7 +86,7 @@ base commit, acceptance checks and decision to integrate or archive.
 
 | Priority | Research question | Acceptance needed before integration |
 |---|---|---|
-| 1 | Can physical-capacity admission coordinate all affected ranks before execution? | Insufficient capacity waits/rejects cleanly, cancellation releases ownership, asymmetric rank failures do not deadlock or partially advance execution |
+| In progress | Can physical-capacity admission coordinate all affected ranks before execution? | Native capacity candidate implements a synchronous single-DP protocol; CPU checks are separate from pending NPU TP1/TP2, cancellation and asymmetric-pressure acceptance |
 | 2 | Can residency reserves / coalesced operations / narrower fences reduce reclaim overhead? | Same correctness and physical borrowing checks, with measured control latency, token gaps, throughput and capacity tradeoffs |
 | 3 | Can queued execution and transfers publish complete owner lifetimes? | Async/graph/connector completion coverage, overlapping execution and cancellation tests; no silent fallback |
 | Validation | Can the migrated burst tool demonstrate benefits under matched serving load? | Native/held/elastic matched conditions, both tenants' output and latency, fixed traffic and pressure, all offered requests counted |

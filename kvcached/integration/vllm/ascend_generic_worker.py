@@ -10,15 +10,17 @@ This experimental entry point reports evidence, not a universal support claim.
 import json
 import os
 import time
+from contextlib import nullcontext
 from functools import wraps
 
 import torch
 from vllm_ascend.worker.worker import NPUWorker
 
-from kvcached.integration.vllm.native_storage import NativeByteAllocation, NativeStorageArena
+from kvcached.integration.vllm.native_storage import NativeByteAllocation, NativeMetadataViews, NativeStorageArena
 from kvcached.integration.vllm.native_residency import dummy_state_owners
 from kvcached.residency import ResidencyOwners
 from kvcached.capacity_relief import is_capacity_rejection
+from kvcached.native_capacity import NativeBudget, NativeBudgetState
 
 
 class NativeElasticWorker(NPUWorker):
@@ -42,7 +44,20 @@ class NativeElasticWorker(NPUWorker):
         self.native_arena = None
         self.native_owners = None
         self.native_epoch = 0
-        self.native_elastic = False
+        self.native_capacity_enabled = os.getenv('KVCACHED_NATIVE_CAPACITY') == '1'
+        self.native_elastic = self.native_capacity_enabled
+        limit = os.getenv('KVCACHED_NATIVE_LIMIT_BYTES')
+        prefix = os.getenv('KVCACHED_NATIVE_PREFIX_BLOCKS')
+        self.native_budget = NativeBudgetState(NativeBudget(
+            0, None if limit is None else int(limit), None if prefix is None else int(prefix)))
+        self.native_capacity_ticket = 0
+        if self.native_capacity_enabled:
+            if (config.parallel_config.data_parallel_size != 1
+                    or config.max_concurrent_batches != 1):
+                raise ValueError('Capacity mode requires single-DP serialized execution')
+            backend = config.parallel_config.distributed_executor_backend
+            if not (isinstance(backend, str) and backend.endswith('.NativeCapacityExecutor')):
+                raise ValueError('Select the explicit NativeCapacityExecutor for capacity mode')
         self.native_steps = 0
         self.native_mapped_revision = -1
         self.native_graph_replays = 0
@@ -90,7 +105,8 @@ class NativeElasticWorker(NPUWorker):
                      reserved=torch.npu.memory_reserved())
         print('KVCACHED_NATIVE_ALLOCATOR_HANDOFF ' + json.dumps(
             dict(rank=self.rank, before=before, after=after)), flush=True)
-        arena = NativeStorageArena(self.device, vmm_ops, self._residency_fence)
+        arena = NativeStorageArena(self.device, vmm_ops, self._residency_fence,
+                                   lazy=self.native_capacity_enabled)
         allocate = attn_utils._allocate_kv_cache
         reshape = attn_utils._reshape_kv_cache_v2
         allocations = 0
@@ -106,7 +122,8 @@ class NativeElasticWorker(NPUWorker):
 
         @wraps(reshape)
         def reshape_native(*args, **kwargs):
-            views = reshape(*args, **kwargs)
+            with NativeMetadataViews(arena) if arena.lazy else nullcontext():
+                views = reshape(*args, **kwargs)
             config = kwargs.get('kv_cache_config')
             if config is None:
                 raise ValueError("Native reshape did not supply its cache configuration")
@@ -114,19 +131,13 @@ class NativeElasticWorker(NPUWorker):
             # Null/padding slots can be accessed by empty DP batches and graphs.
             self.native_owners.replace({'null': [(group, 0)
                                         for group in self.native_owners.layout.groups]})
+            # Native initialization may bind/inspect null cache data after
+            # reshape. Only materialize the validated null views at this point.
+            arena.ensure(self.native_owners.required_pages())
             return views
 
         # Worker initialization is serialized. Limit hook lifetime to the one
         # persistent phase; profiling/capture's temporary caches remain native.
-        attn_utils._allocate_kv_cache = allocate_native
-        attn_utils._reshape_kv_cache_v2 = reshape_native
-        try:
-            super().initialize_from_config(kv_cache_config)
-        finally:
-            attn_utils._allocate_kv_cache = allocate
-            attn_utils._reshape_kv_cache_v2 = reshape
-        if allocations != 1 or not arena.raw or self.native_owners is None:
-            raise RuntimeError("Native storage hook did not materialize a validated layout")
         self.native_arena = arena
         prepare_dummy = self.model_runner.prepare_dummy_attn
 
@@ -136,6 +147,8 @@ class NativeElasticWorker(NPUWorker):
             # state slots before launching attention, so backing is needed here,
             # not only when a real request enters the scheduler's block table.
             self._trace_residency('dummy-prepare', num_requests=input_batch.num_reqs)
+            if self.native_owners is None:
+                raise RuntimeError('Dummy cache access preceded validated native layout')
             blocks = dummy_state_owners(self.native_owners.layout.block_counts,
                                         input_batch.num_reqs)
             self.native_owners.replace({'runtime-dummy': blocks})
@@ -145,9 +158,36 @@ class NativeElasticWorker(NPUWorker):
             self._trace_residency('dummy-ready')
             return result
 
+        if self.native_capacity_enabled:
+            self.model_runner.prepare_dummy_attn = prepare_owned_dummy
+        attn_utils._allocate_kv_cache = allocate_native
+        attn_utils._reshape_kv_cache_v2 = reshape_native
+        try:
+            super().initialize_from_config(kv_cache_config)
+        finally:
+            attn_utils._allocate_kv_cache = allocate
+            attn_utils._reshape_kv_cache_v2 = reshape
+        if allocations != 1 or not arena.raw or self.native_owners is None:
+            raise RuntimeError("Native storage hook did not materialize a validated layout")
         self.model_runner.prepare_dummy_attn = prepare_owned_dummy
         torch.npu.synchronize()
         print('KVCACHED_GENERIC_LAYOUT ' + json.dumps(self._native_status()), flush=True)
+
+    def compile_or_warm_up_model(self):
+        if not self.native_capacity_enabled:
+            return super().compile_or_warm_up_model()
+        # Capture must not grow storage while recording a graph. The native
+        # MRV2 dummy contract uses null and state slots 1..max_num_reqs; back
+        # them before entering warmup/capture, independently of virtual size.
+        owners = dummy_state_owners(self.native_owners.layout.block_counts,
+                                    self.model_runner.max_num_reqs)
+        self.native_owners.replace({'startup-dummy': owners})
+        self.native_arena.ensure(self.native_owners.required_pages())
+        result = super().compile_or_warm_up_model()
+        self._residency_fence()
+        self.native_owners.replace({'startup-dummy': (), 'runtime-dummy': ()})
+        self.native_arena.transition(self.native_owners.required_pages())
+        return result
 
     def execute_model(self, scheduler_output):
         return self._call_traced('execute', self._execute_with_residency, scheduler_output)
@@ -198,17 +238,24 @@ class NativeElasticWorker(NPUWorker):
         if (snapshot.epoch != self.native_epoch + 1 or snapshot.num_groups != len(layout.groups)
                 or set(layout.block_counts.values()) != {snapshot.num_blocks}):
             raise ValueError("Native ownership epoch or layout identity changed")
-        self.native_owners.replace({**snapshot.owners, 'runtime-dummy': ()})
+        self.native_owners.replace({**snapshot.owners, 'runtime-dummy': (), 'admission': ()})
         if self.native_mapped_revision != self.native_owners.revision:
             required = self.native_owners.required_pages()
             self._trace_residency('ensure-enter')
-            self.native_arena.ensure(required)
-            self._trace_residency('ensure-complete')
+            if self.native_capacity_enabled:
+                # Admission has already materialized all candidate components
+                # on every TP rank. Do not attempt uncoordinated late growth.
+                if any(not required[key] <= self.native_arena.residency.mapped[key]
+                       for key in required):
+                    raise RuntimeError('Execution requires pages absent from native admission')
             if self.native_elastic:
                 # Full device completion fences all streams, including graph-update
                 # and state-copy streams. Optimize only after event coverage proof.
-                self.native_arena.residency.reclaim(required)
+                self.native_arena.transition(required)
                 self._trace_residency('reclaim-complete')
+            else:
+                self.native_arena.ensure(required)
+            self._trace_residency('ensure-complete')
             self.native_mapped_revision = self.native_owners.revision
         self.native_epoch = snapshot.epoch
         self.native_steps += 1
@@ -230,7 +277,50 @@ class NativeElasticWorker(NPUWorker):
                     physical_budget=dict(arena.operations.physical_budget_state()),
                     group_blocks=layout.block_counts, spans=len(layout.spans),
                     base_addresses={key: raw.data_ptr() for key, raw in arena.raw.items()},
+                    capacity_mode=self.native_capacity_enabled,
+                    budget=self.native_budget.status(arena.residency.storages,
+                        arena.residency.mapped, self.native_owners.required_pages()),
                     owners=self.native_owners.snapshot())
+
+    def kvcached_native_prepare(self, snapshot, candidate_ids, budget, ticket):
+        """Return every TP response before the scheduler makes an admission.
+
+        No inference is launched here. Local pages may be released before a
+        clean growth miss; only unowned contents are discarded. Failed TP
+        grants are reconciled by the scheduler before allocation can proceed.
+        """
+        if not self.native_capacity_enabled or self.native_arena is None:
+            raise RuntimeError('Native capacity mode is not initialized')
+        fatal = None
+        rejection = None
+        try:
+            if type(ticket) is not int or ticket <= self.native_capacity_ticket:
+                raise ValueError('Stale native capacity ticket')
+            self.native_capacity_ticket = ticket
+            layout = self.native_owners.layout
+            if (snapshot.version != 1 or snapshot.num_groups != len(layout.groups)
+                    or set(layout.block_counts.values()) != {snapshot.num_blocks}):
+                raise ValueError('Native admission layout mismatch')
+            self.native_budget.apply(NativeBudget(**budget))
+            self.native_owners.replace({**snapshot.owners, 'admission': [
+                (group, block) for group in layout.groups for block in candidate_ids]})
+            arena = self.native_arena
+            required = self.native_owners.required_pages()
+            if not self.native_budget.permits(arena.residency.storages,
+                                              arena.residency.mapped, required):
+                rejection = 'instance_limit'
+            else:
+                arena.transition(required)
+        except Exception as error:
+            if (not self.native_arena.residency.poisoned
+                    and is_capacity_rejection(error)):
+                rejection = str(error)
+            else:
+                fatal = repr(error)
+        return dict(rank=self.rank, ticket=ticket, ok=fatal is None and rejection is None,
+                    fatal=fatal, rejection=rejection,
+                    budget=self.native_budget.status(self.native_arena.residency.storages,
+                        self.native_arena.residency.mapped, self.native_owners.required_pages()))
 
     def kvcached_native_control(self, action='status'):
         if self.native_arena is None:
@@ -243,15 +333,16 @@ class NativeElasticWorker(NPUWorker):
             reclaimed = self.native_arena.residency.reclaim(self.native_owners.required_pages())
             self.native_elastic = True
         elif action == 'held':
-            try:
-                self.native_arena.ensure(self.native_arena.residency.full())
-            except RuntimeError as error:
-                if self.native_arena.residency.poisoned or not is_capacity_rejection(error):
-                    raise
-                # A recoverable policy rejection is a normal RPC result. Let
-                # every TP worker return its response; throwing here can leave
-                # later collectives reading an earlier worker response.
-                rejection = str(error)
+            if self.native_capacity_enabled:
+                rejection = 'held_disabled_in_capacity_mode: use kvcached_native_budget'
+            else:
+                try:
+                    self.native_arena.ensure(self.native_arena.residency.full())
+                except RuntimeError as error:
+                    if self.native_arena.residency.poisoned or not is_capacity_rejection(error):
+                        raise
+                    # Return a normal RPC result on every TP worker.
+                    rejection = str(error)
             if rejection is None:
                 torch.npu.synchronize()
                 self.native_elastic = False
