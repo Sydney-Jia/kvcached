@@ -41,8 +41,9 @@ class PhysicalResidency:
         desired = {key: set(pages) for key, pages in desired.items()}
         for key, pages in desired.items():
             storage = self.storages[key]
+            end, granularity = storage.reservation_bytes, storage.page_bytes
             if any(type(page) is not int or page < 0
-                   or page >= storage.reservation_bytes or page % storage.page_bytes
+                   or page >= end or page % granularity
                    for page in pages):
                 raise ValueError("Invalid physical page offset")
         return desired

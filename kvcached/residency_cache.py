@@ -13,9 +13,11 @@ class SparePageCache:
     def __init__(self):
         self.clock = 0
         self.recent = {}
+        self.required = {}
 
     def clear(self):
         self.recent.clear()
+        self.required.clear()
 
     def select(self, storages, mapped, required, spare_bytes, limit_bytes=None):
         optional_nonnegative(spare_bytes, 'spare_bytes')
@@ -26,13 +28,20 @@ class SparePageCache:
         page_bytes(storages, mapped)
         room = spare_bytes if limit_bytes is None else min(spare_bytes, max(0, limit_bytes - live))
         self.clock += 1
-        self.recent = {
-            (key, page): (self.clock if page in required[key]
-                          else self.recent.get((key, page), 0))
-            for key in storages for page in mapped[key] | required[key]
-        }
         target = {key: set(pages) for key, pages in required.items()}
-        candidates = [(key, page) for key in storages for page in mapped[key] - required[key]]
+        # Recency matters only for spare pages. Record their last transition
+        # out of the required set instead of rebuilding a per-page timestamp
+        # dictionary for the much larger active working set on every call.
+        recent = {}
+        for key in storages:
+            previous = self.required.get(key, ())
+            for page in mapped[key] - required[key]:
+                identity = (key, page)
+                recent[identity] = (self.clock if page in previous
+                                    else self.recent.get(identity, 0))
+        self.required = {key: frozenset(pages) for key, pages in required.items()}
+        self.recent = recent
+        candidates = list(recent)
         if sum(storages[key].page_bytes for key, _ in candidates) > room:
             candidates.sort(key=lambda item: (-self.recent[item], item))
         for key, page in candidates:
