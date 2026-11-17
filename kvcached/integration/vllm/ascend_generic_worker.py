@@ -10,13 +10,16 @@ This experimental entry point reports evidence, not a universal support claim.
 import json
 import os
 import time
+from contextlib import nullcontext
 from functools import wraps
 
 import torch
 from vllm_ascend.worker.worker import NPUWorker
 
+from kvcached.integration.vllm import native_profile
 from kvcached.integration.vllm.native_storage import NativeByteAllocation, NativeStorageArena
 from kvcached.integration.vllm.native_residency import dummy_state_owners
+from kvcached.integration.vllm.native_admission import install_gate, note_progress
 from kvcached.residency import ResidencyOwners
 from kvcached.capacity_relief import is_capacity_rejection
 
@@ -41,8 +44,20 @@ class NativeElasticWorker(NPUWorker):
                 raise ValueError(f"{axis} requires an additional distributed lifetime contract")
         self.native_arena = None
         self.native_owners = None
+        self.native_gate = None
         self.native_epoch = 0
         self.native_elastic = False
+        auto_reclaim = os.getenv('KVCACHED_NATIVE_AUTO_RECLAIM')
+        if auto_reclaim is None:
+            # Sparse/demand workloads can overcommit; reclaim retired pages
+            # before mapping new ones.  Full held mode keeps backing pages.
+            mode = os.getenv(
+                'KVCACHED_NATIVE_INITIAL_MAP', 'full').strip().lower()
+            auto_reclaim = '1' if (mode in ('sparse', 'demand')
+                                   or os.getenv(
+                                       'KVCACHED_NATIVE_INSTANCE_LIMIT')) else '0'
+        self.native_auto_reclaim = auto_reclaim.strip().lower() in (
+            '1', 'true', 'yes')
         self.native_steps = 0
         self.native_mapped_revision = -1
         self.native_graph_replays = 0
@@ -114,6 +129,8 @@ class NativeElasticWorker(NPUWorker):
             # Null/padding slots can be accessed by empty DP batches and graphs.
             self.native_owners.replace({'null': [(group, 0)
                                         for group in self.native_owners.layout.groups]})
+            # In sparse mode, keep only the initial mandatory pages mapped.
+            arena.ensure(self.native_owners.required_pages())
             return views
 
         # Worker initialization is serialized. Limit hook lifetime to the one
@@ -128,6 +145,7 @@ class NativeElasticWorker(NPUWorker):
         if allocations != 1 or not arena.raw or self.native_owners is None:
             raise RuntimeError("Native storage hook did not materialize a validated layout")
         self.native_arena = arena
+        self.native_gate = install_gate(arena, self.native_owners)
         prepare_dummy = self.model_runner.prepare_dummy_attn
 
         @wraps(prepare_dummy)
@@ -167,12 +185,16 @@ class NativeElasticWorker(NPUWorker):
         if self.native_trace_residency:
             import faulthandler
             faulthandler.dump_traceback_later(45, repeat=False, file=self.native_trace_file)
+        started = time.perf_counter()
         try:
             return function(*args)
         finally:
+            native_profile.record(
+                "worker." + phase + "_total", time.perf_counter() - started)
             if self.native_trace_residency:
                 faulthandler.cancel_dump_traceback_later()
             self._trace_residency(phase + '-finished')
+            note_progress()
 
     def _trace_residency(self, phase, **extra):
         if self.native_trace_residency:
@@ -186,7 +208,24 @@ class NativeElasticWorker(NPUWorker):
         torch.npu.synchronize()
         self._trace_residency('fence-complete')
 
+    def _ensure_with_capacity_wait(self, required):
+        wait_s = float(os.getenv('KVCACHED_NATIVE_ENSURE_WAIT_S', '0') or 0)
+        deadline = time.monotonic() + max(0.0, wait_s)
+        while True:
+            try:
+                self.native_arena.ensure(required)
+                return
+            except (MemoryError, RuntimeError) as error:
+                capacity_miss = (
+                    is_capacity_rejection(error)
+                    or str(error).startswith('capacity_exhausted:'))
+                if not capacity_miss or time.monotonic() >= deadline:
+                    raise
+                self._trace_residency('ensure-wait', error=str(error)[:160])
+                time.sleep(1.0)
+
     def _execute_with_residency(self, scheduler_output):
+        step_started = time.perf_counter()
         self._trace_residency('step-enter',
                               scheduled_tokens=scheduler_output.total_num_scheduled_tokens)
         if self.native_arena is None:
@@ -198,22 +237,73 @@ class NativeElasticWorker(NPUWorker):
         if (snapshot.epoch != self.native_epoch + 1 or snapshot.num_groups != len(layout.groups)
                 or set(layout.block_counts.values()) != {snapshot.num_blocks}):
             raise ValueError("Native ownership epoch or layout identity changed")
+        replace_started = time.perf_counter()
         self.native_owners.replace({**snapshot.owners, 'runtime-dummy': ()})
+        native_profile.record(
+            "worker.owners_replace", time.perf_counter() - replace_started,
+            last_n=sum(len(v) for v in snapshot.owners.values()))
         if self.native_mapped_revision != self.native_owners.revision:
+            phase_started = time.perf_counter()
             required = self.native_owners.required_pages()
-            self._trace_residency('ensure-enter')
-            self.native_arena.ensure(required)
-            self._trace_residency('ensure-complete')
-            if self.native_elastic:
-                # Full device completion fences all streams, including graph-update
-                # and state-copy streams. Optimize only after event coverage proof.
-                self.native_arena.residency.reclaim(required)
-                self._trace_residency('reclaim-complete')
+            lock = (self.native_gate.physical_lock
+                    if self.native_gate is not None else nullcontext())
+            if self.native_gate is not None:
+                self.native_gate.critical_enter()
+            try:
+                with lock:
+                    reclaim_required = required
+                    if self.native_gate is not None:
+                        prefetched = self.native_gate.prefetch_pages()
+                        if prefetched:
+                            # Speculative pages are not initialized here: they
+                            # are map-only. Keep them out of retirement until a
+                            # request consumes them or the prefetcher drops them.
+                            reclaim_required = {
+                                key: required[key] | prefetched.get(key, set())
+                                for key in required
+                            }
+                    if self.native_auto_reclaim:
+                        # The scheduler may have admitted this step by evicting
+                        # prefix blocks or preempting a request. Release retired
+                        # pages before mapping the new required set; otherwise
+                        # ensure sees a full budget even though ownership shrank.
+                        reclaim_started = time.perf_counter()
+                        dropped = self.native_arena.residency.reclaim(
+                            reclaim_required)
+                        native_profile.record(
+                            "worker.pre_ensure_reclaim",
+                            time.perf_counter() - reclaim_started,
+                            nbytes=dropped)
+                        if dropped:
+                            self._trace_residency('pre-ensure-reclaim',
+                                                  reclaimed_bytes=dropped)
+                    self._trace_residency('ensure-enter')
+                    ensure_started = time.perf_counter()
+                    self._ensure_with_capacity_wait(required)
+                    native_profile.record(
+                        "worker.ensure", time.perf_counter() - ensure_started)
+                    self._trace_residency('ensure-complete')
+                    if self.native_elastic:
+                        # Full device completion fences all streams, including
+                        # graph-update and state-copy streams.
+                        elastic_started = time.perf_counter()
+                        self.native_arena.residency.reclaim(required)
+                        native_profile.record(
+                            "worker.elastic_reclaim",
+                            time.perf_counter() - elastic_started)
+                        self._trace_residency('reclaim-complete')
+                native_profile.record(
+                    "worker.physical_phase", time.perf_counter() - phase_started)
+            finally:
+                if self.native_gate is not None:
+                    self.native_gate.critical_exit()
             self.native_mapped_revision = self.native_owners.revision
         self.native_epoch = snapshot.epoch
         self.native_steps += 1
         self._trace_residency('native-execute-enter')
         result = super().execute_model(scheduler_output)
+        native_profile.record(
+            "worker.step_total", time.perf_counter() - step_started)
         self._trace_residency('native-execute-return')
         return result
 
@@ -229,6 +319,11 @@ class NativeElasticWorker(NPUWorker):
                     physical_device=arena.operations.current_device_pci_bus_id(),
                     physical_budget=dict(arena.operations.physical_budget_state()),
                     group_blocks=layout.block_counts, spans=len(layout.spans),
+                    block_sizes=layout.block_sizes,
+                    max_block_bytes={group: layout.max_block_bytes(group)
+                                     for group in layout.groups},
+                    average_block_bytes={group: layout.average_block_bytes(group)
+                                         for group in layout.groups},
                     base_addresses={key: raw.data_ptr() for key, raw in arena.raw.items()},
                     owners=self.native_owners.snapshot())
 

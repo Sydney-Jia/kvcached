@@ -20,6 +20,21 @@ from kvcached.errors import MapQuarantinedError, StateConsistencyError, Quaranti
 from kvcached.residency import Layout, Storage, block_first_spans
 
 
+def _env_bytes(name):
+    value = os.getenv(name)
+    if not value:
+        return None
+    value = value.strip()
+    scale = 1
+    if value[-1:].lower() == 'k':
+        scale, value = 1024, value[:-1]
+    elif value[-1:].lower() == 'm':
+        scale, value = 1024 * 1024, value[:-1]
+    elif value[-1:].lower() == 'g':
+        scale, value = 1024 * 1024 * 1024, value[:-1]
+    return int(float(value) * scale)
+
+
 class NativeStorageArena:
     def __init__(self, device, operations, synchronize, page_bytes=2 * 1024 * 1024):
         self.device = torch.device(device)
@@ -62,6 +77,9 @@ class NativeStorageArena:
             self.residency, desired, self._release_unused_allocator,
             self._allocator_snapshot, self._report_capacity_relief)
 
+    def prefetch(self, desired):
+        return self.residency.prefetch(desired)
+
     def _initialize(self, key, pages):
         storage = self.residency.storages[key]
         runs = []
@@ -87,7 +105,21 @@ class NativeStorageArena:
             raise RuntimeError("Raw storage factory must return exactly one byte tensor")
         self.raw[storage.key] = tensors[0][:storage.size_bytes]
         self.residency.register(storage, pool_id)
-        self.ensure(self.residency.full())
+        limit = _env_bytes("KVCACHED_NATIVE_INSTANCE_LIMIT")
+        if limit is not None:
+            status = self.operations.set_instance_budget_limit(int(limit), 0)
+            print('KVCACHED_NATIVE_INSTANCE_LIMIT ' + json.dumps(
+                dict(instance=self.instance_name, limit_bytes=int(limit),
+                     status=status)), flush=True)
+        mode = os.getenv("KVCACHED_NATIVE_INITIAL_MAP", "full").strip().lower()
+        if mode not in ("full", "sparse", "demand"):
+            raise ValueError(
+                "KVCACHED_NATIVE_INITIAL_MAP must be full, sparse, or demand")
+        if mode == "full":
+            self.ensure(self.residency.full())
+        else:
+            print('KVCACHED_NATIVE_SPARSE_INIT ' + json.dumps(
+                dict(instance=self.instance_name, size_bytes=int(size))), flush=True)
         return self.raw[storage.key]
 
     def find_storage(self, tensor):
@@ -116,7 +148,12 @@ class NativeStorageArena:
                         storage=key, group_id=group_id, offset=offset,
                         shape=tuple(tensor.shape), strides=tuple(tensor.stride()),
                         itemsize=tensor.element_size(), num_blocks=config.num_blocks))
-        return Layout(self.residency.storages.values(), spans)
+        block_sizes = {}
+        for group_id, group in enumerate(config.kv_cache_groups):
+            size = getattr(group.kv_cache_spec, 'block_size', None)
+            if size:
+                block_sizes[group_id] = int(size)
+        return Layout(self.residency.storages.values(), spans, block_sizes)
 
 
 class NativeByteAllocation(TorchDispatchMode):

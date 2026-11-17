@@ -106,6 +106,19 @@ class ResidencyContractTests(unittest.TestCase):
                             actual.update((address+b)//16*16 for b in range(itemsize))
                     self.assertTrue(actual <= layout.pages_for([(0,block)])["x"])
 
+    def test_block_byte_estimates_are_ordered_and_cached(self):
+        layout = Layout([Storage("x", 1024, 16)], [
+            BlockSpan("x", 0, 0, 64, 64, 8)], {0: 8})
+        average = layout.average_block_bytes(0)
+        maximum = layout.max_block_bytes(0)
+        upper = layout.block_bytes_upper(0)
+        self.assertGreater(average, 0)
+        self.assertGreaterEqual(maximum, average)
+        self.assertGreaterEqual(upper, maximum)
+        self.assertIs(layout.average_block_bytes(0), average)
+        with self.assertRaises(ValueError):
+            layout.average_block_bytes(1)
+
     def test_group_count_is_not_model_specific(self):
         for count in (1, 2, 4, 7):
             layout = Layout([Storage("x", 64, 16)], [
@@ -114,6 +127,53 @@ class ResidencyContractTests(unittest.TestCase):
             owners.replace({str(group): [(group, group)] for group in range(count)})
             expected = {group*8//16*16 for group in range(count)}
             self.assertEqual(owners.required_pages()["x"], expected)
+
+
+    def test_incremental_page_ledger_matches_full_recompute(self):
+        """Differential test: incremental bookkeeping must equal a full pass."""
+        import random
+
+        layout = self.layout()
+        owners = Owners(layout)
+        rng = random.Random(20261117)
+
+        def reference():
+            blocks = set().union(*owners._owners.values()) if owners._owners else set()
+            for blockset, _ in owners._executions.values():
+                blocks.update(blockset)
+            return layout.pages_for(blocks)
+
+        for step in range(600):
+            action = rng.random()
+            if action < 0.45:
+                name = f"req:{rng.randrange(6)}"
+                pool = [(group, block) for group in (0, 1) for block in range(10)]
+                chosen = rng.sample(pool, rng.randrange(0, 6))
+                owners.replace({name: chosen})
+            elif action < 0.6:
+                known = sorted(owners._owners)
+                if known:
+                    owners.replace({}, [rng.choice(known)])
+            elif action < 0.75 and owners._owners:
+                name = rng.choice(sorted(owners._owners))
+                blocks = list(owners._owners[name])
+                if blocks:
+                    owners.remove_blocks(
+                        name, rng.sample(blocks, rng.randrange(1, len(blocks) + 1)))
+            elif action < 0.9:
+                identity = f"graph:{rng.randrange(4)}"
+                if identity not in owners._executions:
+                    ready = [False]
+                    blocks = rng.sample([(0, b) for b in range(10)],
+                                        rng.randrange(1, 4))
+                    owners.begin_execution(identity, blocks, lambda r=ready: r[0])
+                    self.__dict__.setdefault("_ready", {})[identity] = ready
+            else:
+                ready = self.__dict__.setdefault("_ready", {})
+                for flag in ready.values():
+                    flag[0] = rng.random() < 0.5
+                owners.collect_completed()
+            self.assertEqual(owners.required_pages(), reference(), msg=f"step {step}")
 
 
 if __name__ == "__main__":
