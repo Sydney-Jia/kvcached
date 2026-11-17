@@ -9,6 +9,7 @@ views. Explicit metadata validation follows allocation before elastic use.
 
 import json
 import os
+import time
 from uuid import uuid4
 
 import torch
@@ -18,6 +19,7 @@ from kvcached.physical_residency import PhysicalResidency
 from kvcached.capacity_relief import ensure_with_allocator_relief
 from kvcached.errors import MapQuarantinedError, StateConsistencyError, QuarantinedResizeError
 from kvcached.residency import Layout, Storage, block_first_spans
+from kvcached.residency_cache import SparePageCache
 
 
 class NativeStorageArena:
@@ -31,12 +33,31 @@ class NativeStorageArena:
         # engines sharing this physical device and budget file.
         self.instance_name = f'native-residency-{os.getpid()}-{uuid4().hex}'
         self.raw = {}
+        self.spare_cache = None
+        self.spare_retries = 0
+        self.profile_enabled = os.getenv('KVCACHED_NATIVE_PROFILE') == '1'
+        self.profile = {}
+        self._complete = synchronize
         self.residency = PhysicalResidency(
-            operations, synchronize, self._initialize,
+            operations, self._synchronize, self._initialize,
             fatal_errors=(MapQuarantinedError, StateConsistencyError, QuarantinedResizeError))
         self._initialized = False
         self.capacity_relief_attempts = 0
         self.last_capacity_relief = None
+
+    def _timed(self, name, function, *args):
+        if not self.profile_enabled:
+            return function(*args)
+        start = time.perf_counter_ns()
+        try:
+            return function(*args)
+        finally:
+            row = self.profile.setdefault(name, dict(calls=0, host_ns=0))
+            row['calls'] += 1
+            row['host_ns'] += time.perf_counter_ns() - start
+
+    def _synchronize(self):
+        return self._timed('completion_fence', self._complete)
 
     def _allocator_snapshot(self):
         free, total = torch.npu.mem_get_info()
@@ -60,18 +81,48 @@ class NativeStorageArena:
             dict(instance=self.instance_name, device=str(self.device), **event)), flush=True)
 
     def ensure(self, desired):
-        return ensure_with_allocator_relief(
+        return self._timed('ensure_with_relief', ensure_with_allocator_relief,
             self.residency, desired, self._release_unused_allocator,
             self._allocator_snapshot, self._report_capacity_relief)
 
-    def transition(self, desired):
+    def transition(self, desired, *, spare_bytes=0, limit_bytes=None):
+        return self._timed('transition', self._transition, desired, spare_bytes, limit_bytes)
+
+    def _transition(self, desired, spare_bytes, limit_bytes):
         # Validation and the device fence happen before retirement. Preserve
         # allocator relief for clean growth failures after unowned pages retire.
-        reclaimed = self.residency.reclaim(desired)
-        grown = self.ensure(desired)
+        if spare_bytes:
+            desired = self.residency._validate(desired)
+            if self.spare_cache is None:
+                self.spare_cache = SparePageCache()
+            target = self.spare_cache.select(self.residency.storages,
+                self.residency.mapped, desired, spare_bytes, limit_bytes)
+        else:
+            if self.spare_cache is not None:
+                self.spare_cache.clear()
+            target = desired
+        has_spares = any(set(target[key]) - desired[key] for key in desired)
+        reclaimed = self._timed('reclaim', self.residency.reclaim, target)
+        if has_spares:
+            try:
+                # Do not flush the torch allocator while disposable spare
+                # pages could satisfy our own growth. Drop those first.
+                grown = self._timed('ensure_with_spares', self.residency.ensure, target)
+            except RuntimeError as error:
+                if self.residency.poisoned or not str(error).startswith('capacity_exhausted:'):
+                    raise
+                self.spare_retries += 1
+                self.spare_cache.clear()
+                reclaimed += self._timed('reclaim', self.residency.reclaim, desired)
+                grown = self.ensure(desired)
+        else:
+            grown = self.ensure(desired)
         return dict(reclaimed_bytes=reclaimed, grown_bytes=grown)
 
     def _initialize(self, key, pages):
+        return self._timed('initialize_enqueue', self._initialize_pages, key, pages)
+
+    def _initialize_pages(self, key, pages):
         storage = self.residency.storages[key]
         runs = []
         for offset in sorted(pages):

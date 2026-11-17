@@ -51,6 +51,9 @@ class NativeElasticWorker(NPUWorker):
         self.native_budget = NativeBudgetState(NativeBudget(
             0, None if limit is None else int(limit), None if prefix is None else int(prefix)))
         self.native_capacity_ticket = 0
+        self.native_spare_bytes = int(os.getenv('KVCACHED_NATIVE_SPARE_BYTES', '0'))
+        if self.native_spare_bytes < 0:
+            raise ValueError('KVCACHED_NATIVE_SPARE_BYTES must be nonnegative')
         if self.native_capacity_enabled:
             if (config.parallel_config.data_parallel_size != 1
                     or config.max_concurrent_batches != 1):
@@ -251,7 +254,7 @@ class NativeElasticWorker(NPUWorker):
             if self.native_elastic:
                 # Full device completion fences all streams, including graph-update
                 # and state-copy streams. Optimize only after event coverage proof.
-                self.native_arena.transition(required)
+                self._transition_native(required, snapshot)
                 self._trace_residency('reclaim-complete')
             else:
                 self.native_arena.ensure(required)
@@ -263,6 +266,16 @@ class NativeElasticWorker(NPUWorker):
         result = super().execute_model(scheduler_output)
         self._trace_residency('native-execute-return')
         return result
+
+    def _transition_native(self, required, snapshot, *, release_spares=False):
+        reserve = getattr(self, 'native_spare_bytes', 0)
+        if (self.native_capacity_enabled and reserve and not release_spares
+                and snapshot.owners.get('requests')):
+            return self.native_arena.transition(required, spare_bytes=reserve,
+                limit_bytes=self.native_budget.budget.limit_bytes)
+        # Idle engines, explicit budget changes and partial-grant rollback
+        # must converge without another request or an expiry timer.
+        return self.native_arena.transition(required)
 
     def _native_status(self):
         arena = self.native_arena
@@ -278,11 +291,14 @@ class NativeElasticWorker(NPUWorker):
                     group_blocks=layout.block_counts, spans=len(layout.spans),
                     base_addresses={key: raw.data_ptr() for key, raw in arena.raw.items()},
                     capacity_mode=self.native_capacity_enabled,
+                    spare_bytes_limit=self.native_spare_bytes,
+                    spare_capacity_retries=arena.spare_retries,
+                    memory_profile=arena.profile,
                     budget=self.native_budget.status(arena.residency.storages,
                         arena.residency.mapped, self.native_owners.required_pages()),
                     owners=self.native_owners.snapshot())
 
-    def kvcached_native_prepare(self, snapshot, candidate_ids, budget, ticket):
+    def kvcached_native_prepare(self, snapshot, candidate_ids, budget, ticket, *, release_spares=False):
         """Return every TP response before the scheduler makes an admission.
 
         No inference is launched here. Local pages may be released before a
@@ -301,6 +317,9 @@ class NativeElasticWorker(NPUWorker):
             if (snapshot.version != 1 or snapshot.num_groups != len(layout.groups)
                     or set(layout.block_counts.values()) != {snapshot.num_blocks}):
                 raise ValueError('Native admission layout mismatch')
+            if type(release_spares) is not bool:
+                raise ValueError('release_spares must be boolean')
+            changed = budget['revision'] != self.native_budget.budget.revision
             self.native_budget.apply(NativeBudget(**budget))
             self.native_owners.replace({**snapshot.owners, 'admission': [
                 (group, block) for group in layout.groups for block in candidate_ids]})
@@ -310,7 +329,8 @@ class NativeElasticWorker(NPUWorker):
                                               arena.residency.mapped, required):
                 rejection = 'instance_limit'
             else:
-                arena.transition(required)
+                self._transition_native(required, snapshot,
+                    release_spares=release_spares or changed)
         except Exception as error:
             if (not self.native_arena.residency.poisoned
                     and is_capacity_rejection(error)):

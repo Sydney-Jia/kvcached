@@ -9,6 +9,7 @@ This conservative first implementation prioritizes safety over packing density.
 """
 
 import inspect
+import os
 from copy import deepcopy
 from dataclasses import replace
 from functools import wraps
@@ -42,6 +43,7 @@ class NativeAdmission:
         self.last_failed_prepare = None
         self.denied_allocations = 0
         self.evicted_prefix_blocks = 0
+        self.spare_enabled = int(os.getenv('KVCACHED_NATIVE_SPARE_BYTES', '0')) > 0
         self._install()
 
     def _snapshot(self):
@@ -64,8 +66,9 @@ class NativeAdmission:
         }
         return replace(snapshot, owners=owners)
 
-    def _prepare(self, candidates):
+    def _prepare(self, candidates, *, release_spares=False):
         self.ticket += 1
+        options = {'kwargs': {'release_spares': True}} if release_spares and self.spare_enabled else {}
         rows = self.rpc(
             "kvcached_native_prepare",
             args=(
@@ -74,6 +77,7 @@ class NativeAdmission:
                 self.budget.as_dict(),
                 self.ticket,
             ),
+            **options,
         )
         success = all_rank_success(rows, self.ranks)
         self.last_rows = rows
@@ -156,7 +160,7 @@ class NativeAdmission:
                 return True
         # A TP grant is not atomic. Drop speculative pages on *every* rank
         # before reporting no capacity to the native scheduler.
-        if not self._prepare(previous):
+        if not self._prepare(previous, release_spares=True):
             raise RuntimeError("Unable to preserve existing state after admission rejection")
         self.denied_allocations += 1
         return False
