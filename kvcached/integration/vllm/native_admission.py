@@ -1019,7 +1019,7 @@ def patch_block_pool_admission():
                 gate.forget_blocks(blocks)
                 group_id = _GROUP.get()
                 if group_id is not None and os.getenv(
-                        "KVCACHED_NATIVE_DEFER_GROUP_MAP", "1").strip() != "0":
+                        "KVCACHED_NATIVE_DEFER_GROUP_MAP", "0").strip() != "0":
                     # Every group-context allocation is part of the
                     # KVCacheBlocks that allocate_slots maps once, after all
                     # groups are allocated.  Mapping here repeats the driver
