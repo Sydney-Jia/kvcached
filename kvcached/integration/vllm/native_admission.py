@@ -10,9 +10,11 @@ This conservative first implementation prioritizes safety over packing density.
 
 import inspect
 import os
+import time
 from copy import deepcopy
 from dataclasses import replace
 from functools import wraps
+from itertools import islice
 from types import SimpleNamespace
 
 from kvcached.native_capacity import NativeBudget, all_rank_success
@@ -44,10 +46,31 @@ class NativeAdmission:
         self.denied_allocations = 0
         self.evicted_prefix_blocks = 0
         self.spare_enabled = int(os.getenv('KVCACHED_NATIVE_SPARE_BYTES', '0')) > 0
+        self.step_grants_enabled = os.getenv('KVCACHED_NATIVE_STEP_GRANTS') == '1'
+        self.profile_enabled = os.getenv('KVCACHED_NATIVE_PROFILE') == '1'
+        self.profile = {}
+        self.counters = dict(rpc_calls=0, grant_hits=0, batch_attempts=0,
+                             batch_fallbacks=0, snapshots=0, prefix_scans=0,
+                             candidate_queue_scans=0)
+        self._grant = None
+        self._step_warm = set()
+        self._warm_attempted = False
         self._install()
 
+    def _timed(self, name, function, *args, **kwargs):
+        if not self.profile_enabled:
+            return function(*args, **kwargs)
+        start = time.perf_counter_ns()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            row = self.profile.setdefault(name, dict(calls=0, host_ns=0))
+            row['calls'] += 1
+            row['host_ns'] += time.perf_counter_ns() - start
+
     def _snapshot(self):
-        return snapshot_ownership(
+        self.counters['snapshots'] += 1
+        return self._timed('snapshot', snapshot_ownership,
             self.coordinator,
             SimpleNamespace(new_block_ids_to_zero=(), kv_cache_block_copies=()),
             epoch=max(1, self.epoch),
@@ -66,13 +89,41 @@ class NativeAdmission:
         }
         return replace(snapshot, owners=owners)
 
-    def _prepare(self, candidates, *, release_spares=False):
+    @staticmethod
+    def _coverage(snapshot, candidates):
+        # This is a physical-readiness proof, not native prefix validity.
+        # Every candidate is prepared in every group by the worker contract.
+        owners = set().union(*snapshot.owners.values())
+        owners.update((group, block) for group in range(snapshot.num_groups)
+                      for block in candidates)
+        return frozenset(owners)
+
+    def _prepare(self, candidates, *, release_spares=False, snapshot=None):
+        return self._timed('prepare', self._prepare_impl, candidates,
+                           release_spares=release_spares, snapshot=snapshot)
+
+    def _prepare_impl(self, candidates, *, release_spares=False, snapshot=None):
+        if snapshot is None:
+            snapshot = self._protected_snapshot()
+        scope = (snapshot.version, snapshot.epoch, snapshot.num_groups,
+                 snapshot.num_blocks, self.budget)
+        coverage = None
+        if self.step_grants_enabled and self.in_schedule and not release_spares:
+            coverage = self._coverage(snapshot, candidates)
+            if (self._grant is not None and self._grant[0] == scope
+                    and coverage <= self._grant[1]):
+                self.counters['grant_hits'] += 1
+                return True
+        # Any worker call can retire pages or partially fail. Never keep the
+        # old proof across it, even when response validation raises.
+        self._grant = None
         self.ticket += 1
         options = {'kwargs': {'release_spares': True}} if release_spares and self.spare_enabled else {}
-        rows = self.rpc(
+        self.counters['rpc_calls'] += 1
+        rows = self._timed('rpc', self.rpc,
             "kvcached_native_prepare",
             args=(
-                self._protected_snapshot(),
+                snapshot,
                 tuple(sorted(candidates)),
                 self.budget.as_dict(),
                 self.ticket,
@@ -100,9 +151,15 @@ class NativeAdmission:
                 candidate_count=len(candidates),
                 ranks=deepcopy(rows),
             )
+        elif coverage is not None:
+            # Valid only while this serialized scheduler round owns control.
+            # No forward, dummy execution or external maintenance can run
+            # between these allocations; end_schedule invalidates the proof.
+            self._grant = (scope, coverage)
         return success
 
     def _eligible_prefixes(self, exclude=()):
+        self.counters['prefix_scans'] += 1
         exclude = set(exclude)
         aliases = self.pool.cached_block_hashes_by_block
         return [
@@ -116,8 +173,10 @@ class NativeAdmission:
         ]
 
     def evict_prefixes(self, *, pressure=False, exclude=()):
-        eligible = self._eligible_prefixes(exclude)
         cap = self.budget.prefix_max_blocks
+        if not pressure and cap is None:
+            return 0
+        eligible = self._timed('prefix_scan', self._eligible_prefixes, exclude)
         count = len(eligible) if pressure else (0 if cap is None else max(0, len(eligible) - cap))
         # Use the engine's eviction API so all hash aliases, metrics and events
         # change together. Never discard native reuse watchers or active blocks.
@@ -131,6 +190,9 @@ class NativeAdmission:
         if self.in_schedule:
             raise RuntimeError("Native admission does not support queued scheduling")
         self.epoch = epoch
+        self._grant = None
+        self._step_warm.clear()
+        self._warm_attempted = False
         self.step_candidates.clear()
         self.step_base = {}
         self.evict_prefixes()
@@ -141,15 +203,42 @@ class NativeAdmission:
         self.in_schedule = True
 
     def end_schedule(self):
+        self._grant = None
+        self._step_warm.clear()
         self.in_schedule = False
         self.context = None
 
     def try_admit(self, candidates, prefix_hits=()):
         previous = set(self.step_candidates)
         wanted = previous | set(candidates) | set(prefix_hits)
-        if self._prepare(wanted):
+        snapshot = self._protected_snapshot()
+        if self.step_grants_enabled and not self._warm_attempted:
+            self._warm_attempted = True
+            # Batch only existing running-request copy-source candidates.
+            # No guessed future slots and no change to native allocation.
+            warm = {block for _, block in snapshot.owners['requests']}
+            if warm - wanted:
+                self.counters['batch_attempts'] += 1
+                if self._prepare(wanted | warm, snapshot=snapshot):
+                    self._step_warm = warm
+                    self.step_candidates = wanted
+                    return True
+                self.counters['batch_fallbacks'] += 1
+                # An oversized batch must not prevent a smaller request from
+                # running. Roll back all ranks before the original admission.
+                if not self._prepare(previous, release_spares=True, snapshot=snapshot):
+                    raise RuntimeError('Unable to roll back native step preparation')
+        if self._prepare(wanted | self._step_warm, snapshot=snapshot):
             self.step_candidates = wanted
             return True
+        if self._step_warm:
+            self.counters['batch_fallbacks'] += 1
+            self._step_warm.clear()
+            if not self._prepare(previous, release_spares=True, snapshot=snapshot):
+                raise RuntimeError('Unable to drop native step preparation')
+            if self._prepare(wanted, snapshot=snapshot):
+                self.step_candidates = wanted
+                return True
         # Idle prefixes can otherwise keep all reclaimable pages mapped. A
         # pressure retry invalidates only cold entries, in native LRU order.
         # This initial policy evicts all eligible cold entries on a hard miss;
@@ -169,6 +258,8 @@ class NativeAdmission:
         if self.in_schedule or self.context is not None:
             raise RuntimeError("Cannot reconcile during native allocation")
         self.step_candidates.clear()
+        self._grant = None
+        self._step_warm.clear()
         self.step_base = {}
         self.evict_prefixes(pressure=pressure)
         if not self._prepare(set()):
@@ -176,6 +267,8 @@ class NativeAdmission:
         return self.status()
 
     def set_budget(self, *, limit_bytes, prefix_max_blocks, expected_revision):
+        if self.in_schedule or self.context is not None:
+            raise RuntimeError('Cannot change native budget during allocation')
         if type(expected_revision) is not int or expected_revision != self.budget.revision:
             raise ValueError("Native budget revision conflict")
         candidate = NativeBudget(self.budget.revision + 1, limit_bytes, prefix_max_blocks)
@@ -203,6 +296,9 @@ class NativeAdmission:
             observed_ticket=self.ticket,
             ranks=self.last_rows,
             last_failed_prepare=deepcopy(self.last_failed_prepare),
+            step_grants_enabled=self.step_grants_enabled,
+            admission_counters=dict(self.counters),
+            admission_profile=deepcopy(self.profile),
         )
 
     def _install(self):
@@ -242,11 +338,15 @@ class NativeAdmission:
             if needed > logical:
                 return logical
             hits = context["hits"]
-            free = pool.free_block_queue.get_all_free_blocks()
             # Prefix touch removes its blocks before get_new_blocks. Exclude
             # those IDs when predicting the free queue after touch. Demand may
             # include those hits; retaining a few extra candidates is safe.
-            candidates = [block.block_id for block in free if block.block_id not in hits][:needed]
+            candidates = []
+            if needed:
+                self.counters['candidate_queue_scans'] += 1
+                free = pool.free_block_queue.get_all_free_blocks()
+                candidates = list(islice(
+                    (block.block_id for block in free if block.block_id not in hits), needed))
             if self.try_admit(candidates, hits | context["sources"]):
                 return logical
             # Zero demand can still touch a cached block in a different native
@@ -256,7 +356,7 @@ class NativeAdmission:
         @wraps(original_new)
         def get_new(count):
             if self.context is not None:
-                actual = [
+                actual = [] if count == 0 else [
                     block.block_id for block in pool.free_block_queue.get_all_free_blocks()[:count]
                 ]
                 if not set(actual) <= self.step_candidates:
