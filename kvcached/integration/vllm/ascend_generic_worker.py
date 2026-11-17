@@ -289,6 +289,7 @@ class NativeElasticWorker(NPUWorker):
                     physical_device=arena.operations.current_device_pci_bus_id(),
                     physical_budget=dict(arena.operations.physical_budget_state()),
                     group_blocks=layout.block_counts, spans=len(layout.spans),
+                    layout_page_cache=layout.cache_status(),
                     base_addresses={key: raw.data_ptr() for key, raw in arena.raw.items()},
                     capacity_mode=self.native_capacity_enabled,
                     spare_bytes_limit=self.native_spare_bytes,

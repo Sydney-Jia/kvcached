@@ -13,6 +13,7 @@ the kernels that previously consumed its state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import OrderedDict
 from itertools import product
 from math import prod
 from typing import Callable, Iterable, Mapping
@@ -121,7 +122,14 @@ def block_first_spans(*, storage: str, group_id: int, offset: int,
 class Layout:
     """Validated storage/view graph, independent of page/block geometry ratios."""
 
-    def __init__(self, storages: Iterable[Storage], spans: Iterable[BlockSpan]):
+    def __init__(self, storages: Iterable[Storage], spans: Iterable[BlockSpan],
+                 *, cache_page_entries: int = 65536):
+        _integer(cache_page_entries, 'cache_page_entries')
+        self.cache_page_entries = cache_page_entries
+        self._block_pages = OrderedDict()
+        self._cached_offsets = 0
+        self._cache_hits = 0
+        self._cache_misses = 0
         entries = tuple(storages)
         self.storages = {entry.key: entry for entry in entries}
         if not entries or len(entries) != len(self.storages):
@@ -154,13 +162,41 @@ class Layout:
     def pages_for(self, blocks: Iterable[tuple[int, int]]) -> dict[str, frozenset[int]]:
         pages: dict[str, set[int]] = {key: set() for key in self.storages}
         for group, block in self.validate_blocks(blocks):
-            for span in self.groups[group]:
-                allocation = self.storages[span.storage]
-                start, end = span.interval(block)
-                first = start // allocation.page_bytes * allocation.page_bytes
-                stop = (end + allocation.page_bytes - 1) // allocation.page_bytes * allocation.page_bytes
-                pages[span.storage].update(range(first, stop, allocation.page_bytes))
+            for key, offsets in self._pages_for_block(group, block):
+                pages[key].update(offsets)
         return {key: frozenset(offsets) for key, offsets in pages.items()}
+
+    def _pages_for_block(self, group, block):
+        identity = (group, block)
+        if identity in self._block_pages:
+            self._cache_hits += 1
+            self._block_pages.move_to_end(identity)
+            return self._block_pages[identity]
+        self._cache_misses += 1
+        pages = {}
+        for span in self.groups[group]:
+            allocation = self.storages[span.storage]
+            start, end = span.interval(block)
+            first = start // allocation.page_bytes * allocation.page_bytes
+            stop = (end + allocation.page_bytes - 1) // allocation.page_bytes * allocation.page_bytes
+            pages.setdefault(span.storage, set()).update(range(first, stop, allocation.page_bytes))
+        result = tuple((key, frozenset(offsets)) for key, offsets in pages.items())
+        size = sum(len(offsets) for _, offsets in result)
+        # Geometry is fixed for this validated Layout. Cache only immutable
+        # byte offsets, never owners, physical mappings or prefix validity.
+        # Bound by offset count as well as the finite group/block domain.
+        if size <= self.cache_page_entries:
+            while self._block_pages and self._cached_offsets + size > self.cache_page_entries:
+                _, removed = self._block_pages.popitem(last=False)
+                self._cached_offsets -= sum(len(offsets) for _, offsets in removed)
+            self._block_pages[identity] = result
+            self._cached_offsets += size
+        return result
+
+    def cache_status(self):
+        return dict(hits=self._cache_hits, misses=self._cache_misses,
+                    blocks=len(self._block_pages), page_offsets=self._cached_offsets,
+                    max_page_offsets=self.cache_page_entries)
 
 
 class ResidencyOwners:
