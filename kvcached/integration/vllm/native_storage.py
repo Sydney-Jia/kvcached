@@ -91,8 +91,8 @@ class NativeStorageArena:
     def _transition(self, desired, spare_bytes, limit_bytes):
         # Validation and the device fence happen before retirement. Preserve
         # allocator relief for clean growth failures after unowned pages retire.
+        desired = self.residency._validate(desired)
         if spare_bytes:
-            desired = self.residency._validate(desired)
             if self.spare_cache is None:
                 self.spare_cache = SparePageCache()
             target = self.spare_cache.select(self.residency.storages,
@@ -101,6 +101,11 @@ class NativeStorageArena:
             if self.spare_cache is not None:
                 self.spare_cache.clear()
             target = desired
+        # Serialized residency owns the mapping ledger. An unchanged target
+        # needs neither a VMM operation nor another pair of full page walks.
+        # Validate first so poisoned state and invalid offsets still fail.
+        if all(target[key] == self.residency.mapped[key] for key in target):
+            return dict(reclaimed_bytes=0, grown_bytes=0)
         has_spares = any(set(target[key]) - desired[key] for key in desired)
         reclaimed = self._timed('reclaim', self.residency.reclaim, target)
         if has_spares:
