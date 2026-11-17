@@ -163,8 +163,34 @@ The validated layout also caches immutable block-to-page geometry, bounded to
 65,536 page offsets on the host. It never caches ownership or backing validity.
 An unchanged, validated physical target skips redundant map/reclaim walks.
 For controlled profiling, `KVCACHED_NATIVE_PROFILE=1` exposes cumulative host
-call times in worker status. These nested timings include CPU submission and
-driver calls; they are not device-kernel durations and must not be added together.
+call times in worker status and controller `admission_profile`. These nested
+timings include CPU submission and driver calls; controller `rpc` also includes
+worker execution. They are not device-kernel durations and must not be added
+together.
+
+### Reusing readiness within a synchronous scheduler step
+
+`KVCACHED_NATIVE_STEP_GRANTS=1` enables an experimental fast path (default off).
+The first admission may prepare the copy-source block IDs of existing running
+requests together. Later admissions in that same serialized step can reuse the
+successful all-rank response if their complete owner/candidate coverage is a
+subset, with the same layout identity, epoch and budget revision. The native
+allocator still chooses slots; this does not grant new logical blocks or cache
+old KV validity. Zero-block admissions avoid walking the native free queue but
+still check physical readiness for prefix hits and native copy sources.
+
+The proof expires at the end of scheduling, before model execution, and on any
+worker call or explicit maintenance. It never survives a failed/invalid reply.
+If preparing all running sources exceeds capacity, speculative backing is
+rolled back on every rank before retrying the original smaller admission.
+Control cannot change the budget midway through allocation. This relies on the
+existing synchronous single-DP TP executor; it does not enable asynchronous
+scheduling, cross-DP workers, or out-of-band mapping changes.
+
+`admission_counters` reports actual RPCs, reused grants, batch attempts/fallbacks,
+snapshots and scans. Compare latency, output correctness and per-rank physical
+state with the flag off/on on the same fixed build. Fewer RPCs alone do not prove
+lower latency, and warm preparation can temporarily retain more physical pages.
 
 Budget RPC (the HTTP endpoint must be enabled only for controlled experiments):
 
