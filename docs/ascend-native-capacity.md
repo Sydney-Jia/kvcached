@@ -1,22 +1,23 @@
 # Native Ascend capacity closure — implementation candidate
 
-Updated 2026-11-16. Development stays on `feat/ascend-generic-kv`. This change is
-**CPU-validated candidate code, not new NPU/model/graph acceptance**. Preserve
-the [previous fixed-runtime checkpoint](ascend-native-checkpoint-20261112.md).
-No running service, deployed snapshot, other user's job, or device was changed.
+Implementation dated 2026-11-16; TP1/TP2 hardware checkpoint added 2026-11-17.
+Development stays on `feat/ascend-generic-kv`. See the
+[new hardware evidence and limits](ascend-native-checkpoint-20261117.md) separately
+from the [previous fixed-runtime checkpoint](ascend-native-checkpoint-20261112.md).
+Only newly created, fixed-commit personal test services were used.
 
 ## Capability comparison and evidence
 
 | Capability | Upstream kvcached function | Native NPU implementation in this change | Verification / remaining work |
 |---|---|---|---|
-| Virtual versus physical capacity | Large virtual pool with lazy physical backing | Opt-in lazy native byte arenas; native tensor layout and block capacity stay fixed | Actual arena methods tested with CPU storage; NPU startup peak and access coverage pending |
-| Online return / regrowth | Map demanded pages and retire disposable pages | Complete owner union, fence, retire before growth; rollback newly mapped pages on clean failure | CPU transaction and worker tests pass; previous build had model borrowing acceptance, this candidate still needs rerun |
-| Physical-capacity admission | Elastic pool exposes usable capacity to native scheduling | Explicit scheduler/executor admission; prepare candidate slots on all TP workers before native allocation | Real pinned `allocate_slots` / `BlockPool` Python methods tested; NPU TP1/TP2 and retry liveness pending |
-| Prefix retention and pressure | Bounded prefix retention and quota-triggered eviction | Native eviction API, cold-block limit, pressure retry; preserve active blocks, aliases, reuse watchers | CPU fixture and real native hash/alias API checks; model cache-hit/output/latency checks pending |
-| Idle convergence | Limits can cause reclamation without new demand | Reconcile after output processing, cancellation, and explicit budget updates | CPU boundary checks; real engine idle/cancellation lifecycle pending |
-| Runtime budget | Revisioned limits, observations, convergence | `kvcached_native_budget` RPC with compare-and-set revision, per-rank results, pending versus converged | Python RPC ABI tested; HTTP + real worker control pending; not yet upstream `kvctl` compatibility |
-| Hybrid layouts | Multiple supported attention/cache geometries | Same storage/span/ownership contracts; no model-name branch | Prior 4/13-group acceptance remains historical; candidate must rerun multi-group inputs and native CoW |
-| Graph / parallel execution | Framework-specific graph and distributed integration | Pre-back startup dummy slots; existing stable-address execution; new admission limited to synchronous single-DP TP | Graph and TP2 runtime acceptance pending; cross-DP admission, PP/CP, async, connectors unsupported |
+| Virtual versus physical capacity | Large virtual pool with lazy physical backing | Opt-in lazy native byte arenas; native tensor layout and block capacity stay fixed | TP1 hybrid startup: 80 MiB mapped within 8176 MiB reserved; whole-device startup peak not measured |
+| Online return / regrowth | Map demanded pages and retire disposable pages | Complete owner union, fence, retire before growth; rollback newly mapped pages on clean failure | TP1 candidate real-pressure borrowing, idle convergence and output checks passed |
+| Physical-capacity admission | Elastic pool exposes usable capacity to native scheduling | Explicit scheduler/executor admission; prepare candidate slots on all TP workers before native allocation | TP1 physical borrowing and TP2 asymmetric physical rejection / rollback / recovery passed on recorded runtimes |
+| Prefix retention and pressure | Bounded prefix retention and quota-triggered eviction | Native eviction API, cold-block limit, pressure retry; preserve active blocks, aliases, reuse watchers | CPU alias/watcher checks; TP1 hit counters, eviction/recompute and latency recorded |
+| Idle convergence | Limits can cause reclamation without new demand | Reconcile after output processing, cancellation, and explicit budget updates | TP1 eager/graph: last-request and cancellation cleanup passed without new demand |
+| Runtime budget | Revisioned limits, observations, convergence | `kvcached_native_budget` RPC with compare-and-set revision, per-rank results, pending versus converged | TP1/TP2 target changes, waiting/recovery and cancellation passed; upstream kvctl ABI remains absent |
+| Hybrid layouts | Multiple supported attention/cache geometries | Same storage/span/ownership contracts; no model-name branch | Candidate: 4-group hybrid and 1-group ordinary layouts; older 13-group DeepSeek result remains separate |
+| Graph / parallel execution | Framework-specific graph and distributed integration | Pre-back startup dummy slots; existing stable-address execution; new admission limited to synchronous single-DP TP | TP1/TP2 captured replay and lifecycle passed on recorded runtimes; cross-DP, PP/CP, async, connectors unsupported |
 
 Upstream references: [README](https://github.com/ovg-project/kvcached/blob/main/README.md),
 [capacity/pool integration](https://github.com/ovg-project/kvcached/blob/main/kvcached/integration/vllm/patches.py),
@@ -167,15 +168,15 @@ gets its own implementation or permanent branch.
 | Check | Required evidence | Status for this candidate |
 |---|---|---|
 | CPU budget + transactions | Live contents survive rejection; retained-page union; stale revisions rejected | Covered by unit tests |
-| CPU allocation boundaries | Native `allocate_slots`/`BlockPool`, prefix aliases, pending copies, partial TP results | Tested Python functions; full native startup still pending |
-| TP1 lazy startup | Larger logical reservation with smaller mapped footprint; record startup peak, graph/dummy floor, driver HBM | Pending NPU |
-| TP1 donor/receiver | Same real pressure and workload; receiver cannot grow in held baseline, can grow after donor release | Pending NPU |
-| Prefix retain/evict | Repeated shared prefixes before/after budget changes; actual hit counters, exact outputs, latency | Pending NPU |
-| Active shrink + idle convergence | Long decode and cancellation; preserve outputs; idle mapped bytes decrease without new traffic | Pending NPU |
-| Exhaustion / recovery | Both active working sets exceed capacity; no worker crash, no fake tokens, bounded retry; recovery after budget/peer release | Pending NPU |
-| TP2 asymmetric capacity | One rank rejects while another can map; all replies recorded; no partial forward; recovery succeeds | Pending two cards |
-| Graph + hybrid | Same general adapter with actual multiple groups, CoW/state copies, eager and captured paths | Pending candidate rerun |
-| Matched performance | Native/held/candidate same initial physical budget and traffic; both tenants' full outputs and latency | Pending NPU; no performance claim |
+| CPU allocation boundaries | Native `allocate_slots`/`BlockPool`, prefix aliases, pending copies, partial TP results | CPU contracts and real TP1 native startup passed |
+| TP1 lazy startup | Larger logical reservation with smaller mapped footprint; record startup peak, graph/dummy floor, driver HBM | Passed for recorded runtime; not a full startup peak measurement |
+| TP1 donor/receiver | Same real pressure and workload; receiver cannot grow in held baseline, can grow after donor release | Passed fixed-physical-pressure held-prefix/release comparison; not a three-implementation performance benchmark |
+| Prefix retain/evict | Repeated shared prefixes before/after budget changes; actual hit counters, exact outputs, latency | Passed with real hit counters and exact post-eviction output comparison |
+| Active shrink + idle convergence | Long decode and cancellation; preserve outputs; idle mapped bytes decrease without new traffic | TP1 eager/graph and TP2 graph lifecycle passed; zero-target test invokes waiting/preemption, not pause-free shrink |
+| Exhaustion / recovery | Both active working sets exceed capacity; no worker crash, no fake tokens, bounded retry; recovery after budget/peer release | TP1 physical refusal/recovery and quota waiting/recovery passed |
+| TP2 asymmetric capacity | One rank rejects while another can map; all replies recorded; no partial forward; recovery succeeds | Passed on newer pinned runtime: rank 0 physically rejected, rank 1 granted 288 MiB then rolled back to 48 MiB; token counters did not advance until pressure release; recovered full output matched |
+| Graph + hybrid | Same general adapter with actual multiple groups, CoW/state copies, eager and captured paths | TP1/TP2 graph lifecycle and shared-prefix concurrency passed as recorded separate runs; CPU copy/owner contracts pass, but concurrency alone does not prove every native CoW branch executed |
+| Matched performance | Native/held/candidate same initial physical budget and traffic; both tenants' full outputs and latency | Initial latency costs measured; matched performance/SLO acceptance remains open |
 
 CPU tests are deliberate layers of evidence: transaction objects, real worker
 methods with a CPU page backend, and unmodified Python functions loaded from a
