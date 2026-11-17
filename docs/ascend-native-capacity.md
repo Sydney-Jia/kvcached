@@ -124,6 +124,9 @@ export KVCACHED_NATIVE_CAPACITY=1
 # Examples only: choose budgets after measuring weights / non-KV / dummy floor.
 export KVCACHED_NATIVE_LIMIT_BYTES=2147483648
 export KVCACHED_NATIVE_PREFIX_BLOCKS=64
+# Optional active-step reuse of already mapped, currently unowned pages.
+# Default 0; this example permits up to 256 MiB per worker within its KV limit.
+export KVCACHED_NATIVE_SPARE_BYTES=268435456
 
 # Append to the pinned native vLLM-Ascend service's existing arguments:
 --worker-cls kvcached.integration.vllm.ascend_generic_worker.NativeElasticWorker
@@ -139,6 +142,29 @@ environment limit bounds serving KV backing. Native startup checks still honor
 Do not assume two instances with utilization 0.9 will pass native startup merely
 because their KV allocations are lazy. Initial profiling uses native temporary
 caches and still needs real device capacity. Verify this on hardware.
+
+### Avoiding repeated physical map/unmap work
+
+`KVCACHED_NATIVE_SPARE_BYTES` retains a bounded set of previously mapped pages
+while requests remain active. It does not allocate that reserve in advance,
+increase logical capacity, or make old KV contents valid. Native zero/copy and
+cache-validity rules are unchanged. Spare bytes count toward the same physical
+KV limit. Idle cleanup, a changed budget revision, and partial-rank admission
+rollback discard spares; a clean local growth rejection drops them before
+allocator relief. A peer needing memory must still use the budget protocol;
+this is not an automatic cross-engine reclamation scheduler.
+
+The tradeoff is fewer VMM operations for some temporarily retained HBM. Tune
+the bound against concurrency and measured headroom, not the model name.
+Active state and valid retained prefixes can keep an idle engine above zero.
+Physical retirement still uses the existing completion fence.
+
+The validated layout also caches immutable block-to-page geometry, bounded to
+65,536 page offsets on the host. It never caches ownership or backing validity.
+An unchanged, validated physical target skips redundant map/reclaim walks.
+For controlled profiling, `KVCACHED_NATIVE_PROFILE=1` exposes cumulative host
+call times in worker status. These nested timings include CPU submission and
+driver calls; they are not device-kernel durations and must not be added together.
 
 Budget RPC (the HTTP endpoint must be enabled only for controlled experiments):
 
