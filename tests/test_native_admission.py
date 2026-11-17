@@ -159,6 +159,15 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(self.rpc.mapped, {0: set(), 1: set()})
         self.assertEqual(self.guard.denied_allocations, 1)
         self.assertFalse(self.manager.coordinator.single_type_managers[0].req_to_blocks)
+        status = self.guard.status()
+        self.assertTrue(all(row['ok'] for row in status['ranks']))
+        failed = status['last_failed_prepare']
+        self.assertEqual(failed['candidate_count'], 2)
+        self.assertEqual([row['ok'] for row in failed['ranks']], [True, False])
+        self.assertLess(failed['ticket'], status['observed_ticket'])
+        # Read-only consumers cannot mutate retained evidence or current state.
+        failed['ranks'][0]['ok'] = False
+        self.assertTrue(self.guard.status()['last_failed_prepare']['ranks'][0]['ok'])
 
     def test_zero_new_block_demand_can_still_be_rejected_cleanly(self):
         hit = self.pool.blocks[3]

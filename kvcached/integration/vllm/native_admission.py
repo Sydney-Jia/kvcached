@@ -9,6 +9,7 @@ This conservative first implementation prioritizes safety over packing density.
 """
 
 import inspect
+from copy import deepcopy
 from dataclasses import replace
 from functools import wraps
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ class NativeAdmission:
         self.context = None
         self.inside_get_new = False
         self.last_rows = []
+        self.last_failed_prepare = None
         self.denied_allocations = 0
         self.evicted_prefix_blocks = 0
         self._install()
@@ -83,6 +85,17 @@ class NativeAdmission:
             for row in rows
         ):
             raise RuntimeError("Stale native capacity response")
+        if not success:
+            # Rollback/reconcile replaces last_rows with a successful current
+            # observation. Retain the bounded failure record separately so a
+            # caller can distinguish per-rank physical rejection from quota
+            # rejection, without treating old rows as the current grant.
+            self.last_failed_prepare = dict(
+                ticket=self.ticket,
+                revision=self.budget.revision,
+                candidate_count=len(candidates),
+                ranks=deepcopy(rows),
+            )
         return success
 
     def _eligible_prefixes(self, exclude=()):
@@ -185,6 +198,7 @@ class NativeAdmission:
             expected_ranks=list(self.ranks),
             observed_ticket=self.ticket,
             ranks=self.last_rows,
+            last_failed_prepare=deepcopy(self.last_failed_prepare),
         )
 
     def _install(self):
