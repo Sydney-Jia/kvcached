@@ -10,17 +10,23 @@ from uuid import uuid4
 
 
 class PhysicalResidency:
-    def __init__(self, operations, synchronize, initialize, fatal_errors=()):
+    def __init__(self, operations, synchronize, initialize, fatal_errors=(), *, timed=None):
         self.operations = operations
         self.synchronize = synchronize
         self.initialize = initialize
         self.fatal_errors = fatal_errors
+        self._timer = timed
         self.storages = {}
         self.pool_ids = {}
         self.mapped = {}
         self.poisoned = False
         self.grown_bytes = 0
         self.reclaimed_bytes = 0
+
+    def _stage(self, name, operation, *args):
+        if self._timer is None:
+            return operation(*args)
+        return self._timer(name, operation, *args)
 
     def register(self, storage, pool_id):
         if storage.key in self.storages or pool_id in self.pool_ids.values():
@@ -56,8 +62,8 @@ class PhysicalResidency:
                 missing = sorted(target - self.mapped[key])
                 if not missing:
                     continue
-                success, attached = self.operations.map_to_kv_tensors_with_result(
-                    missing, self.pool_ids[key])
+                success, attached = self._stage(
+                    'map', self.operations.map_to_kv_tensors_with_result, missing, self.pool_ids[key])
                 if not success:
                     raise MemoryError(f"Unable to back storage {key}")
                 if set(attached) != set(missing):
@@ -66,7 +72,7 @@ class PhysicalResidency:
                 added[key] = set(attached)
                 self.mapped[key].update(attached)
             for key, pages in added.items():
-                self.initialize(key, pages)
+                self._stage('initialize', self.initialize, key, pages)
         except Exception as error:
             # Backend quarantine means a map or its rollback has uncertain
             # state. Rolling back other newly added pages does not repair it.
@@ -78,7 +84,8 @@ class PhysicalResidency:
                 if added:
                     self.synchronize()
                 for key, pages in added.items():
-                    if not self.operations.unmap_from_kv_tensors(sorted(pages), self.pool_ids[key]):
+                    if not self._stage('rollback_map', self.operations.unmap_from_kv_tensors,
+                                       sorted(pages), self.pool_ids[key]):
                         raise RuntimeError("Failed to undo newly mapped pages")
                     self.mapped[key].difference_update(pages)
             except Exception as rollback:
@@ -105,8 +112,8 @@ class PhysicalResidency:
         prepared = []
         try:
             for key, pages in retiring.items():
-                if not self.operations.prepare_unmap_from_kv_tensors(
-                        pages, transaction, self.pool_ids[key]):
+                if not self._stage('prepare_unmap', self.operations.prepare_unmap_from_kv_tensors,
+                                   pages, transaction, self.pool_ids[key]):
                     raise RuntimeError("Physical retirement preparation failed")
                 prepared.append(key)
         except Exception as error:
@@ -114,7 +121,8 @@ class PhysicalResidency:
                 self.poisoned = True
             try:
                 for key in reversed(prepared):
-                    if not self.operations.abort_unmap_from_kv_tensors(transaction, self.pool_ids[key]):
+                    if not self._stage('abort_unmap', self.operations.abort_unmap_from_kv_tensors,
+                                       transaction, self.pool_ids[key]):
                         raise RuntimeError("Physical retirement rollback failed")
             except Exception as rollback:
                 self.poisoned = True
@@ -122,7 +130,8 @@ class PhysicalResidency:
             raise
         try:
             for key in prepared:
-                if not self.operations.commit_unmap_from_kv_tensors(transaction, self.pool_ids[key]):
+                if not self._stage('commit_unmap', self.operations.commit_unmap_from_kv_tensors,
+                                   transaction, self.pool_ids[key]):
                     raise RuntimeError("Physical retirement commit failed")
                 self.mapped[key].difference_update(retiring[key])
         except Exception:

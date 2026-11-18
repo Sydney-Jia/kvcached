@@ -40,7 +40,8 @@ class NativeStorageArena:
         self._complete = synchronize
         self.residency = PhysicalResidency(
             operations, self._synchronize, self._initialize,
-            fatal_errors=(MapQuarantinedError, StateConsistencyError, QuarantinedResizeError))
+            fatal_errors=(MapQuarantinedError, StateConsistencyError, QuarantinedResizeError),
+            timed=self._timed if self.profile_enabled else None)
         self._initialized = False
         self.capacity_relief_attempts = 0
         self.last_capacity_relief = None
