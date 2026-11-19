@@ -183,7 +183,7 @@ class NativeStorageArena:
             if target is None:
                 return 0
             chunk = self._select_retire_chunk(target, self.retire_batch_bytes)
-            if not chunk:
+            if not any(chunk.values()):
                 return 0
             reclaimed = self._timed('retire_async', self.residency.reclaim,
                                     target, chunk)
@@ -192,7 +192,8 @@ class NativeStorageArena:
         return reclaimed
 
     def _select_retire_chunk(self, target, limit):
-        chunk = {}
+        # Eligible page sets must name every storage, exactly like targets.
+        chunk = {key: set() for key in self.residency.mapped}
         total = 0
         for key, mapped in self.residency.mapped.items():
             extra = mapped - target[key]
