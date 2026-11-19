@@ -286,6 +286,10 @@ class NativeElasticWorker(NPUWorker):
             self.native_mapped_revision = self.native_owners.revision
         self.native_epoch = snapshot.epoch
         self.native_steps += 1
+        if scheduler_output.total_num_scheduled_tokens:
+            note_activity = getattr(self.native_arena, 'note_activity', None)
+            if note_activity is not None:
+                note_activity()
         self._trace_residency('native-execute-enter')
         result = super().execute_model(scheduler_output)
         self._trace_residency('native-execute-return')

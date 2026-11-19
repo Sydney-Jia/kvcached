@@ -61,9 +61,15 @@ class NativeStorageArena:
             self.retire_interval_s = 0.5
         try:
             self.retire_utilization = float(os.getenv(
-                'KVCACHED_NATIVE_RETIRE_UTILIZATION', '0.8'))
+                'KVCACHED_NATIVE_RETIRE_UTILIZATION', '0.95'))
         except ValueError:
-            self.retire_utilization = 0.8
+            self.retire_utilization = 0.95
+        try:
+            self.idle_reclaim_s = max(0.0, float(os.getenv(
+                'KVCACHED_NATIVE_IDLE_RECLAIM_S', '2.0')))
+        except ValueError:
+            self.idle_reclaim_s = 2.0
+        self._last_activity = time.monotonic()
         try:
             self.retire_target = float(os.getenv(
                 'KVCACHED_NATIVE_RETIRE_TARGET', '0.7'))
@@ -216,17 +222,31 @@ class NativeStorageArena:
                 if self._retire_stop.wait(0.01):
                     return
 
+    def note_activity(self):
+        """Mark that the engine is executing; retirement is idle work.
+
+        Retiring during active decoding unmaps the free blocks the next
+        admission maps again, so the backlog only drains when the engine has
+        been quiet for ``idle_reclaim_s``. A nearly exhausted budget still
+        forces an emergency pass.
+        """
+        self._last_activity = time.monotonic()
+
     def _retirement_due(self):
+        now = time.monotonic()
+        idle = now - self._last_activity >= self.idle_reclaim_s
         threshold = self.retire_utilization
         if threshold <= 0:
             return True
         try:
             state = self.operations.physical_budget_state()
         except Exception:
-            return True
+            return idle
         budget = int(state.get('budget_bytes', 0) or 0)
         charged = int(state.get('charged_bytes', 0) or 0)
-        return budget <= 0 or charged >= budget * threshold
+        if budget <= 0:
+            return idle
+        return idle or charged >= budget * threshold
 
     def _retire_target_met(self):
         """Stop draining once headroom is back, not merely below the trigger.
