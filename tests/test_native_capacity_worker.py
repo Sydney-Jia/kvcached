@@ -110,22 +110,27 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.memory.data[0][16], "live KV")
         self.assertEqual(self.worker.native_steps, 1)
 
-    def test_async_retirement_keeps_growth_on_the_caller_path_only(self):
+    def test_admission_retires_synchronously_but_execution_does_not(self):
         calls = []
         pages = self.worker.native_arena
         self.worker.native_spare_bytes = 0
+
+        def transition(required, **kwargs):
+            calls.append(("transition", None))
+            return dict(reclaimed_bytes=0, grown_bytes=0)
+
         self.worker.native_arena = NS(
             residency=pages.residency,
             retire_async=True,
             grow=lambda required, **kwargs: calls.append(
                 ("grow", kwargs.get("publish", True))),
-            transition=lambda *args, **kwargs: self.fail(
-                "synchronous transition on the engine path"),
+            transition=transition,
         )
+        # Admission reclaims before growth so the next prepare has budget.
         self.worker._transition_native({"0": {0}}, self.snapshot())
-        # Admission publishes its candidate set; no synchronous retire runs.
-        self.assertEqual(calls, [("grow", True)])
+        self.assertEqual(calls, [("transition", None)])
         calls.clear()
+        # Legacy execution maps only its own pages, off the fence.
         self.worker._transition_native({"0": {0}}, self.snapshot(), publish=False)
         self.assertEqual(calls, [("grow", False)])
 

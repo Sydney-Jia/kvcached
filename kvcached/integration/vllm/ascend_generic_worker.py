@@ -273,12 +273,12 @@ class NativeElasticWorker(NPUWorker):
                        for key in required):
                     raise RuntimeError('Execution requires pages absent from native admission')
             if self.native_elastic:
-                # Full device completion fences all streams, including graph-update
-                # and state-copy streams. Optimize only after event coverage proof.
-                # Execution only knows the owners it needs, not the candidates
-                # admission prepared: keep the published admission target so
-                # the reclaimer cannot unmap a slot the next allocation uses.
-                self._transition_native(required, snapshot, publish=False)
+                # Admission already materialized every required page on every
+                # rank, and its physical transition reclaimed unowned pages
+                # before growing. Retiring again here would fence the device on
+                # every step and unmap the candidates the next admission maps.
+                if not self.native_capacity_enabled:
+                    self._transition_native(required, snapshot, publish=False)
                 self._trace_residency('reclaim-complete')
             else:
                 self.native_arena.ensure(required)
@@ -370,13 +370,16 @@ class NativeElasticWorker(NPUWorker):
                 and snapshot.owners.get('requests')):
             return self.native_arena.transition(required, spare_bytes=reserve,
                 limit_bytes=self.native_budget.budget.limit_bytes, keep=keep)
-        if getattr(self.native_arena, 'retire_async', False) and not reserve:
-            # Growth maps only the required pages; the arena's background
-            # reclaimer fences and unmaps pages that lost their owner. This
-            # keeps the engine loop off the device-wide completion fence.
-            # Spare-cache runs keep the synchronous path: spare selection is a
-            # policy decision that must finish before the step executes.
-            self.native_arena.grow(required, publish=publish)
+        if publish:
+            # Admission owns headroom: the shared budget is sampled against
+            # mapped bytes, so deferring this reclaim turns every prepare into
+            # a rejection the scheduler must retry. Keep it synchronous here;
+            # the engine loop no longer retires on the execution path.
+            return self.native_arena.transition(required, keep=keep)
+        if getattr(self.native_arena, 'retire_async', False):
+            # Legacy elastic execution: map only what it needs and let the
+            # background reclaimer retire unowned pages afterwards.
+            self.native_arena.grow(required, publish=False)
             return dict(reclaimed_bytes=0, grown_bytes=0)
         # Idle engines, explicit budget changes and partial-grant rollback
         # must converge without another request or an expiry timer.

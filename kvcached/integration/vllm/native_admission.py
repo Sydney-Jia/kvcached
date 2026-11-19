@@ -499,10 +499,15 @@ class NativeAdmission:
             }
             # Conservative headroom: the native manager applies its watermark
             # only to some admissions; reserving it here may under-admit but
-            # cannot expose an unbacked slot.
-            headroom = values["reserved_blocks"]
-            if values["has_scheduled_reqs"]:
-                headroom += manager.watermark_blocks
+            # cannot expose an unbacked slot. get_new_blocks still takes the
+            # same free-queue head, so an exact candidate list covers every
+            # allocated slot; speculative extras only add map/retire churn.
+            if os.getenv('KVCACHED_NATIVE_EXACT_CANDIDATES', '0') == '1':
+                headroom = 0
+            else:
+                headroom = values["reserved_blocks"]
+                if values["has_scheduled_reqs"]:
+                    headroom += manager.watermark_blocks
             self.context = dict(demand=None, hits=hits, sources=sources, headroom=headroom)
             try:
                 return original_allocate(*args, **kwargs)
