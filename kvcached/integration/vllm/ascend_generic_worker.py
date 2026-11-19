@@ -59,8 +59,12 @@ class NativeElasticWorker(NPUWorker):
                     or config.max_concurrent_batches != 1):
                 raise ValueError('Capacity mode requires single-DP serialized execution')
             backend = config.parallel_config.distributed_executor_backend
-            if not (isinstance(backend, str) and backend.endswith('.NativeCapacityExecutor')):
-                raise ValueError('Select the explicit NativeCapacityExecutor for capacity mode')
+            explicit = isinstance(backend, str) and backend.endswith(
+                ('.NativeCapacityExecutor', '.NativeCapacityUniProcExecutor'))
+            if not explicit:
+                raise ValueError(
+                    'Select the explicit NativeCapacityExecutor or '
+                    'NativeCapacityUniProcExecutor for capacity mode')
         self.native_steps = 0
         self.native_mapped_revision = -1
         self.native_graph_replays = 0
