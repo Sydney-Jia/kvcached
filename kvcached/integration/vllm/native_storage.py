@@ -127,11 +127,18 @@ class NativeStorageArena:
         with self._lock:
             return self._timed('prefetch', self.residency.prefetch, desired)
 
-    def grow(self, desired):
-        """Map required pages only; no fence and no retirement on this path."""
+    def grow(self, desired, *, publish=True):
+        """Map required pages only; no fence and no retirement on this path.
+
+        ``publish`` updates the set the background reclaimer must preserve.
+        Admission publishes because it knows every candidate the next
+        allocation may touch; the execute path does not, so its narrower owner
+        set must not unmap candidates that admission just prepared.
+        """
         with self._lock:
             desired = self.residency._validate(desired)
-            self._latest_required = desired
+            if publish or self._latest_required is None:
+                self._latest_required = desired
             self._start_retire_thread()
             return self._timed('grow', self.residency.ensure, desired)
 

@@ -275,7 +275,10 @@ class NativeElasticWorker(NPUWorker):
             if self.native_elastic:
                 # Full device completion fences all streams, including graph-update
                 # and state-copy streams. Optimize only after event coverage proof.
-                self._transition_native(required, snapshot)
+                # Execution only knows the owners it needs, not the candidates
+                # admission prepared: keep the published admission target so
+                # the reclaimer cannot unmap a slot the next allocation uses.
+                self._transition_native(required, snapshot, publish=False)
                 self._trace_residency('reclaim-complete')
             else:
                 self.native_arena.ensure(required)
@@ -355,7 +358,8 @@ class NativeElasticWorker(NPUWorker):
             response['error'] = repr(error)[:160]
             return response
 
-    def _transition_native(self, required, snapshot, *, release_spares=False):
+    def _transition_native(self, required, snapshot, *, release_spares=False,
+                           publish=True):
         reserve = getattr(self, 'native_spare_bytes', 0)
         _, keep = self._live_prefetch()
         if (self.native_capacity_enabled and reserve and not release_spares
@@ -368,8 +372,7 @@ class NativeElasticWorker(NPUWorker):
             # keeps the engine loop off the device-wide completion fence.
             # Spare-cache runs keep the synchronous path: spare selection is a
             # policy decision that must finish before the step executes.
-            self.native_arena.grow(required)
-            self.native_arena.defer_retire(required)
+            self.native_arena.grow(required, publish=publish)
             return dict(reclaimed_bytes=0, grown_bytes=0)
         # Idle engines, explicit budget changes and partial-grant rollback
         # must converge without another request or an expiry timer.

@@ -117,13 +117,17 @@ class WorkerTests(unittest.TestCase):
         self.worker.native_arena = NS(
             residency=pages.residency,
             retire_async=True,
-            grow=lambda required: calls.append("grow"),
-            defer_retire=lambda required: calls.append("defer"),
+            grow=lambda required, **kwargs: calls.append(
+                ("grow", kwargs.get("publish", True))),
             transition=lambda *args, **kwargs: self.fail(
                 "synchronous transition on the engine path"),
         )
         self.worker._transition_native({"0": {0}}, self.snapshot())
-        self.assertEqual(calls, ["grow", "defer"])
+        # Admission publishes its candidate set; no synchronous retire runs.
+        self.assertEqual(calls, [("grow", True)])
+        calls.clear()
+        self.worker._transition_native({"0": {0}}, self.snapshot(), publish=False)
+        self.assertEqual(calls, [("grow", False)])
 
     def test_unprepared_slot_never_launches_native_inference(self):
         with self.assertRaisesRegex(RuntimeError, "absent from native admission"):
