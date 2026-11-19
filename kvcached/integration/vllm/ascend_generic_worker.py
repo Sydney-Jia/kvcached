@@ -273,12 +273,14 @@ class NativeElasticWorker(NPUWorker):
                        for key in required):
                     raise RuntimeError('Execution requires pages absent from native admission')
             if self.native_elastic:
-                # Admission already materialized every required page on every
-                # rank, and its physical transition reclaimed unowned pages
-                # before growing. Retiring again here would fence the device on
-                # every step and unmap the candidates the next admission maps.
-                if not self.native_capacity_enabled:
-                    self._transition_native(required, snapshot, publish=False)
+                # Admission materialized every required page on every rank, so
+                # a quiet step needs no transition at all: reclaiming here only
+                # unmaps the candidates the next admission maps again. Under
+                # shared-budget pressure, though, the peer engine needs those
+                # pages back, so release them exactly as the base protocol did.
+                if (not self.native_capacity_enabled
+                        or self._budget_pressure()):
+                    self._transition_native(required, snapshot)
                 self._trace_residency('reclaim-complete')
             else:
                 self.native_arena.ensure(required)
@@ -362,28 +364,35 @@ class NativeElasticWorker(NPUWorker):
             response['error'] = repr(error)[:160]
             return response
 
-    def _transition_native(self, required, snapshot, *, release_spares=False,
-                           publish=True):
+    def _transition_native(self, required, snapshot, *, release_spares=False):
         reserve = getattr(self, 'native_spare_bytes', 0)
         _, keep = self._live_prefetch()
         if (self.native_capacity_enabled and reserve and not release_spares
                 and snapshot.owners.get('requests')):
             return self.native_arena.transition(required, spare_bytes=reserve,
                 limit_bytes=self.native_budget.budget.limit_bytes, keep=keep)
-        if publish:
-            # Admission owns headroom: the shared budget is sampled against
-            # mapped bytes, so deferring this reclaim turns every prepare into
-            # a rejection the scheduler must retry. Keep it synchronous here;
-            # the engine loop no longer retires on the execution path.
-            return self.native_arena.transition(required, keep=keep)
-        if getattr(self.native_arena, 'retire_async', False):
-            # Legacy elastic execution: map only what it needs and let the
-            # background reclaimer retire unowned pages afterwards.
-            self.native_arena.grow(required, publish=False)
-            return dict(reclaimed_bytes=0, grown_bytes=0)
         # Idle engines, explicit budget changes and partial-grant rollback
         # must converge without another request or an expiry timer.
         return self.native_arena.transition(required, keep=keep)
+
+    def _budget_pressure(self):
+        """Whether the shared ledger is tight enough to justify a fence.
+
+        The base protocol reclaimed unowned pages on every execution step.
+        That keeps a peer engine growable but fences the device each step, so
+        only pay it once the mapped budget is close to exhausted.
+        """
+        try:
+            threshold = float(os.getenv(
+                'KVCACHED_NATIVE_EXEC_RECLAIM_UTILIZATION', '0.85'))
+            state = self.native_arena.operations.physical_budget_state()
+            budget = int(state.get('budget_bytes', 0) or 0)
+            charged = int(state.get('charged_bytes', 0) or 0)
+        except Exception:
+            return True
+        if budget <= 0:
+            return True
+        return charged >= budget * threshold
 
     def _native_status(self):
         arena = self.native_arena
