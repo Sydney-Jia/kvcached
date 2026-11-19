@@ -89,6 +89,19 @@ class PhysicalTest(unittest.TestCase):
         self.assertEqual(self.pool.mapped['0'], {0})
         self.assertNotIn(16, self.memory.data[0])
 
+    def test_reclaim_eligible_retires_only_the_requested_pages(self):
+        self.pool.ensure(self.pool.full())
+        # The background reclaimer releases bounded chunks: only page 16 is
+        # offered here, so pages 0/32 stay mapped even though they are unowned.
+        self.assertEqual(self.pool.reclaim({'0': {0}, '1': set()},
+                                           eligible={'0': {16}, '1': set()}), 16)
+        self.assertEqual(self.pool.mapped['0'], {0, 32})
+        self.assertNotIn(16, self.memory.data[0])
+        # A later chunk can release the remaining unowned page.
+        self.assertEqual(self.pool.reclaim({'0': {0}, '1': set()},
+                                           eligible={'0': {32}, '1': set()}), 16)
+        self.assertEqual(self.pool.mapped['0'], {0})
+
     def test_reclaim_and_regrow_do_not_overwrite_live_shared_page(self):
         self.pool.ensure(self.pool.full())
         self.memory.data[0][16] = 'live state'

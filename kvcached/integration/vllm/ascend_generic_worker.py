@@ -362,6 +362,15 @@ class NativeElasticWorker(NPUWorker):
                 and snapshot.owners.get('requests')):
             return self.native_arena.transition(required, spare_bytes=reserve,
                 limit_bytes=self.native_budget.budget.limit_bytes, keep=keep)
+        if getattr(self.native_arena, 'retire_async', False) and not reserve:
+            # Growth maps only the required pages; the arena's background
+            # reclaimer fences and unmaps pages that lost their owner. This
+            # keeps the engine loop off the device-wide completion fence.
+            # Spare-cache runs keep the synchronous path: spare selection is a
+            # policy decision that must finish before the step executes.
+            self.native_arena.grow(required)
+            self.native_arena.defer_retire(required)
+            return dict(reclaimed_bytes=0, grown_bytes=0)
         # Idle engines, explicit budget changes and partial-grant rollback
         # must converge without another request or an expiry timer.
         return self.native_arena.transition(required, keep=keep)

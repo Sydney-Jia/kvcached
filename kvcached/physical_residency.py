@@ -137,10 +137,23 @@ class PhysicalResidency:
         self.grown_bytes += total
         return total
 
-    def reclaim(self, required):
+    def reclaim(self, required, eligible=None):
+        """Retire mapped pages outside ``required``.
+
+        ``eligible`` optionally narrows retirement to a page subset, so the
+        background reclaimer can release bounded chunks while the engine keeps
+        growing the required set. Omitted, every unowned page retires.
+        """
         required = self._validate(required)
-        retiring = {key: sorted(pages - required[key]) for key, pages in self.mapped.items()
-                    if pages - required[key]}
+        if eligible is not None:
+            eligible = self._validate(eligible)
+        retiring = {}
+        for key, pages in self.mapped.items():
+            extra = pages - required[key]
+            if eligible is not None:
+                extra = extra & eligible[key]
+            if extra:
+                retiring[key] = sorted(extra)
         if not retiring:
             return 0
         # CPU lifetime updates do not complete prior eager or graph kernels.

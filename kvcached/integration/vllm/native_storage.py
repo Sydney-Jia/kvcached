@@ -50,6 +50,31 @@ class NativeStorageArena:
         # the previous step. Serialize every residency mutation so the ledger,
         # the VMM pool and the spare cache stay consistent.
         self._lock = threading.RLock()
+        # Background retirement: growth maps only what the engine requires;
+        # pages that lost their owner are fenced and unmapped by this thread,
+        # so the engine loop never waits on a device-wide completion.
+        self.retire_async = os.getenv('KVCACHED_NATIVE_RETIRE_ASYNC', '1') == '1'
+        try:
+            self.retire_interval_s = max(0.05, float(os.getenv(
+                'KVCACHED_NATIVE_RETIRE_INTERVAL_S', '0.5')))
+        except ValueError:
+            self.retire_interval_s = 0.5
+        try:
+            self.retire_utilization = float(os.getenv(
+                'KVCACHED_NATIVE_RETIRE_UTILIZATION', '0.8'))
+        except ValueError:
+            self.retire_utilization = 0.8
+        try:
+            self.retire_batch_bytes = max(2 * 1024 * 1024, int(os.getenv(
+                'KVCACHED_NATIVE_RETIRE_BATCH_BYTES', str(4 * 1024 * 1024))))
+        except ValueError:
+            self.retire_batch_bytes = 4 * 1024 * 1024
+        self._latest_required = None
+        self._retire_thread = None
+        self._retire_start_lock = threading.Lock()
+        self._retire_stop = threading.Event()
+        self.retire_chunks = 0
+        self.retired_bytes_async = 0
 
     def _timed(self, name, function, *args):
         if not self.profile_enabled:
@@ -96,6 +121,95 @@ class NativeStorageArena:
         """Map pages only; never fenced, never initialized, never retired."""
         with self._lock:
             return self._timed('prefetch', self.residency.prefetch, desired)
+
+    def grow(self, desired):
+        """Map required pages only; no fence and no retirement on this path."""
+        with self._lock:
+            desired = self.residency._validate(desired)
+            self._latest_required = desired
+            self._start_retire_thread()
+            return self._timed('grow', self.residency.ensure, desired)
+
+    def defer_retire(self, desired):
+        """Publish the current owner set for the background reclaimer."""
+        with self._lock:
+            self._latest_required = self.residency._validate(desired)
+            self._start_retire_thread()
+
+    def _start_retire_thread(self):
+        if not self.retire_async or self._retire_thread is not None:
+            return
+        with self._retire_start_lock:
+            if self._retire_thread is not None:
+                return
+            thread = threading.Thread(target=self._retire_loop,
+                                      name='native-retire', daemon=True)
+            self._retire_thread = thread
+            thread.start()
+
+    def _retire_loop(self):
+        """Release unowned pages off the engine loop, one bounded chunk at a time."""
+        while not self._retire_stop.wait(self.retire_interval_s):
+            if not self._retirement_due():
+                continue
+            # Drain a few bounded chunks per tick, yielding between them so a
+            # step that needs the lock never waits behind a long drain.
+            for _ in range(8):
+                try:
+                    if self._retire_once() <= 0:
+                        break
+                except Exception as error:  # retirement retries next tick
+                    print('KVCACHED_NATIVE_RETIRE_FAILED ' + repr(error)[:200],
+                          flush=True)
+                    break
+                if self._retire_stop.wait(0.01):
+                    return
+
+    def _retirement_due(self):
+        threshold = self.retire_utilization
+        if threshold <= 0:
+            return True
+        try:
+            state = self.operations.physical_budget_state()
+        except Exception:
+            return True
+        budget = int(state.get('budget_bytes', 0) or 0)
+        charged = int(state.get('charged_bytes', 0) or 0)
+        return budget <= 0 or charged >= budget * threshold
+
+    def _retire_once(self):
+        with self._lock:
+            target = self._latest_required
+            if target is None:
+                return 0
+            chunk = self._select_retire_chunk(target, self.retire_batch_bytes)
+            if not chunk:
+                return 0
+            reclaimed = self._timed('retire_async', self.residency.reclaim,
+                                    target, chunk)
+        self.retire_chunks += 1
+        self.retired_bytes_async += int(reclaimed)
+        return reclaimed
+
+    def _select_retire_chunk(self, target, limit):
+        chunk = {}
+        total = 0
+        for key, mapped in self.residency.mapped.items():
+            extra = mapped - target[key]
+            if not extra:
+                continue
+            page_bytes = self.residency.storages[key].page_bytes
+            take = []
+            for page in sorted(extra):
+                take.append(page)
+                total += page_bytes
+                if total >= limit:
+                    break
+            if take:
+                chunk[key] = set(take)
+            if total >= limit:
+                break
+        return chunk
 
     def transition(self, desired, *, spare_bytes=0, limit_bytes=None, keep=()):
         with self._lock:

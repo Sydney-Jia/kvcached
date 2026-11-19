@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from uuid import uuid4
 import os
+import threading
+import time
 import unittest
 
 from test_native_admission import load
@@ -41,6 +43,8 @@ namespace = dict(
     torch=NS(device=lambda device: device, Tensor=RawBytes),
     TorchDispatchMode=object,
     os=os,
+    threading=threading,
+    time=time,
     uuid4=uuid4,
     Storage=residency.Storage,
     PhysicalResidency=physical.PhysicalResidency,
@@ -118,6 +122,38 @@ class LazyStorageTests(unittest.TestCase):
         view = Operation("aten.view.dtype")
         self.assertIs(guard.__torch_dispatch__(view, (), (raw,)), raw)
         self.assertTrue(view.called)
+
+
+    def test_grow_maps_without_retiring_unowned_pages(self):
+        os.environ["KVCACHED_NATIVE_RETIRE_ASYNC"] = "0"
+        try:
+            arena, memory = self.arena(True)
+            arena.allocate(4096)
+            arena.grow({"0": {0, 16}})
+            arena.grow({"0": {0}})
+            self.assertEqual(set(memory.data[0]), {0, 16})
+        finally:
+            del os.environ["KVCACHED_NATIVE_RETIRE_ASYNC"]
+
+    def test_background_reclaimer_retires_pages_that_lost_their_owner(self):
+        os.environ["KVCACHED_NATIVE_RETIRE_ASYNC"] = "1"
+        os.environ["KVCACHED_NATIVE_RETIRE_UTILIZATION"] = "0"
+        os.environ["KVCACHED_NATIVE_RETIRE_INTERVAL_S"] = "0.05"
+        try:
+            arena, memory = self.arena(True)
+            arena.allocate(4096)
+            arena.grow({"0": {0, 16}})
+            arena.defer_retire({"0": {0}})
+            deadline = time.time() + 2
+            while time.time() < deadline and 16 in memory.data[0]:
+                time.sleep(0.02)
+            self.assertEqual(set(memory.data[0]), {0})
+            self.assertGreaterEqual(arena.retire_chunks, 1)
+        finally:
+            for name in ("KVCACHED_NATIVE_RETIRE_ASYNC",
+                         "KVCACHED_NATIVE_RETIRE_UTILIZATION",
+                         "KVCACHED_NATIVE_RETIRE_INTERVAL_S"):
+                del os.environ[name]
 
 
 if __name__ == "__main__":
