@@ -65,6 +65,11 @@ class NativeStorageArena:
         except ValueError:
             self.retire_utilization = 0.8
         try:
+            self.retire_target = float(os.getenv(
+                'KVCACHED_NATIVE_RETIRE_TARGET', '0.7'))
+        except ValueError:
+            self.retire_target = 0.7
+        try:
             self.retire_batch_bytes = max(2 * 1024 * 1024, int(os.getenv(
                 'KVCACHED_NATIVE_RETIRE_BATCH_BYTES', str(4 * 1024 * 1024))))
         except ValueError:
@@ -162,6 +167,8 @@ class NativeStorageArena:
                     print('KVCACHED_NATIVE_RETIRE_FAILED ' + repr(error)[:200],
                           flush=True)
                     break
+                if self._retire_target_met():
+                    break
                 if self._retire_stop.wait(0.01):
                     return
 
@@ -176,6 +183,23 @@ class NativeStorageArena:
         budget = int(state.get('budget_bytes', 0) or 0)
         charged = int(state.get('charged_bytes', 0) or 0)
         return budget <= 0 or charged >= budget * threshold
+
+    def _retire_target_met(self):
+        """Stop draining once headroom is back, not merely below the trigger.
+
+        Retiring only down to the trigger point leaves the next growth burst
+        to cross it again; the target keeps a working margin between passes.
+        """
+        target = self.retire_target
+        if target <= 0:
+            return False
+        try:
+            state = self.operations.physical_budget_state()
+        except Exception:
+            return False
+        budget = int(state.get('budget_bytes', 0) or 0)
+        charged = int(state.get('charged_bytes', 0) or 0)
+        return budget > 0 and charged <= budget * target
 
     def _retire_once(self):
         with self._lock:
