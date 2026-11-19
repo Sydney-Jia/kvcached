@@ -127,7 +127,11 @@ class NativeStorageArena:
         # Validate first so poisoned state and invalid offsets still fail.
         if all(target[key] == self.residency.mapped[key] for key in target):
             return dict(reclaimed_bytes=0, grown_bytes=0)
-        has_spares = any(set(target[key]) - desired[key] for key in desired)
+        # Only real spare-cache pages take the drop-spares retry path; pages
+        # kept from retirement for a speculative prefetch are not spares and
+        # must not require a spare cache to exist.
+        has_spares = bool(spare_bytes) and self.spare_cache is not None and any(
+            set(target[key]) - desired[key] for key in desired)
         reclaimed = self._timed('reclaim', self.residency.reclaim, target)
         if has_spares:
             try:
