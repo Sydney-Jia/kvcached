@@ -9,6 +9,7 @@ This experimental entry point reports evidence, not a universal support claim.
 
 import json
 import os
+import threading
 import time
 from contextlib import nullcontext
 from functools import wraps
@@ -54,6 +55,22 @@ class NativeElasticWorker(NPUWorker):
         self.native_spare_bytes = int(os.getenv('KVCACHED_NATIVE_SPARE_BYTES', '0'))
         if self.native_spare_bytes < 0:
             raise ValueError('KVCACHED_NATIVE_SPARE_BYTES must be nonnegative')
+        # Speculative map-only pages for the next scheduling step. They are
+        # protected from retirement until they are consumed or expire, and a
+        # prefetch thread may touch them while the engine executes.
+        self.native_prefetch_blocks = {}
+        self.native_prefetch_ticket = 0
+        self.native_prefetch_lock = threading.Lock()
+        try:
+            self.native_prefetch_bytes = max(0, int(os.getenv(
+                'KVCACHED_NATIVE_PREFETCH_BYTES', str(512 << 20))))
+        except ValueError:
+            self.native_prefetch_bytes = 512 << 20
+        try:
+            self.native_prefetch_ttl_s = float(os.getenv(
+                'KVCACHED_NATIVE_PREFETCH_TTL_S', '30') or 0)
+        except ValueError:
+            self.native_prefetch_ttl_s = 30.0
         if self.native_capacity_enabled:
             if (config.parallel_config.data_parallel_size != 1
                     or config.max_concurrent_batches != 1):
@@ -271,15 +288,83 @@ class NativeElasticWorker(NPUWorker):
         self._trace_residency('native-execute-return')
         return result
 
+    def _live_prefetch(self, now=None):
+        """Pages held by unexpired speculative blocks, plus their pairs."""
+        registry = getattr(self, 'native_prefetch_blocks', None)
+        if not registry:
+            return (), {}
+        now = time.monotonic() if now is None else now
+        with self.native_prefetch_lock:
+            expired = [block for block, deadline in registry.items()
+                       if deadline <= now]
+            for block in expired:
+                registry.pop(block, None)
+            blocks = tuple(registry)
+        if not blocks:
+            return (), {}
+        layout = self.native_owners.layout
+        pairs = tuple((group, block) for group in layout.groups for block in blocks)
+        return pairs, layout.pages_for(pairs)
+
+    def kvcached_native_prefetch(self, candidate_ids, budget, ticket):
+        """Map predicted candidates ahead of the next step; never initialized.
+
+        Runs on the admission's prefetch thread while the engine executes the
+        previous step. Mapping only, so it issues no device fence and no
+        retirement; failures are reported and dropped, never fatal.
+        """
+        response = dict(rank=self.rank, ticket=ticket, ok=False)
+        if not self.native_capacity_enabled or self.native_arena is None:
+            response['skipped'] = 'disabled'
+            return response
+        if self.native_prefetch_bytes <= 0 or self.native_prefetch_ttl_s <= 0:
+            response['skipped'] = 'off'
+            return response
+        try:
+            if type(ticket) is not int or ticket <= self.native_prefetch_ticket:
+                raise ValueError('Stale native prefetch ticket')
+            self.native_prefetch_ticket = ticket
+            if budget['revision'] != self.native_budget.budget.revision:
+                response['skipped'] = 'stale_budget'
+                return response
+            layout = self.native_owners.layout
+            limit = min(layout.block_counts.values())
+            blocks = sorted({int(block) for block in candidate_ids
+                             if 0 <= int(block) < limit})
+            if not blocks:
+                response['skipped'] = 'empty'
+                return response
+            pairs = tuple((group, block) for group in layout.groups
+                          for block in blocks)
+            pages = layout.pages_for(pairs)
+            storage = self.native_arena.residency.storages
+            size = sum(len(offsets) * storage[key].page_bytes
+                       for key, offsets in pages.items())
+            response['bytes'] = size
+            if size <= 0 or size > self.native_prefetch_bytes:
+                response['skipped'] = 'bytes'
+                return response
+            mapped = self.native_arena.prefetch(pages)
+            deadline = time.monotonic() + self.native_prefetch_ttl_s
+            with self.native_prefetch_lock:
+                for block in blocks:
+                    self.native_prefetch_blocks[block] = deadline
+            response.update(ok=True, mapped_bytes=mapped, blocks=len(blocks))
+            return response
+        except Exception as error:  # prefetch is best-effort
+            response['error'] = repr(error)[:160]
+            return response
+
     def _transition_native(self, required, snapshot, *, release_spares=False):
         reserve = getattr(self, 'native_spare_bytes', 0)
+        _, keep = self._live_prefetch()
         if (self.native_capacity_enabled and reserve and not release_spares
                 and snapshot.owners.get('requests')):
             return self.native_arena.transition(required, spare_bytes=reserve,
-                limit_bytes=self.native_budget.budget.limit_bytes)
+                limit_bytes=self.native_budget.budget.limit_bytes, keep=keep)
         # Idle engines, explicit budget changes and partial-grant rollback
         # must converge without another request or an expiry timer.
-        return self.native_arena.transition(required)
+        return self.native_arena.transition(required, keep=keep)
 
     def _native_status(self):
         arena = self.native_arena

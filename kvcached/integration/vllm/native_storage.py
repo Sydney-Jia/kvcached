@@ -9,6 +9,7 @@ views. Explicit metadata validation follows allocation before elastic use.
 
 import json
 import os
+import threading
 import time
 from uuid import uuid4
 
@@ -45,6 +46,10 @@ class NativeStorageArena:
         self._initialized = False
         self.capacity_relief_attempts = 0
         self.last_capacity_relief = None
+        # A speculative prepare runs on its own thread while the engine executes
+        # the previous step. Serialize every residency mutation so the ledger,
+        # the VMM pool and the spare cache stay consistent.
+        self._lock = threading.RLock()
 
     def _timed(self, name, function, *args):
         if not self.profile_enabled:
@@ -82,26 +87,41 @@ class NativeStorageArena:
             dict(instance=self.instance_name, device=str(self.device), **event)), flush=True)
 
     def ensure(self, desired):
-        return self._timed('ensure_with_relief', ensure_with_allocator_relief,
-            self.residency, desired, self._release_unused_allocator,
-            self._allocator_snapshot, self._report_capacity_relief)
+        with self._lock:
+            return self._timed('ensure_with_relief', ensure_with_allocator_relief,
+                self.residency, desired, self._release_unused_allocator,
+                self._allocator_snapshot, self._report_capacity_relief)
 
-    def transition(self, desired, *, spare_bytes=0, limit_bytes=None):
-        return self._timed('transition', self._transition, desired, spare_bytes, limit_bytes)
+    def prefetch(self, desired):
+        """Map pages only; never fenced, never initialized, never retired."""
+        with self._lock:
+            return self._timed('prefetch', self.residency.prefetch, desired)
 
-    def _transition(self, desired, spare_bytes, limit_bytes):
+    def transition(self, desired, *, spare_bytes=0, limit_bytes=None, keep=()):
+        with self._lock:
+            return self._timed('transition', self._transition, desired, spare_bytes,
+                               limit_bytes, keep)
+
+    def _transition(self, desired, spare_bytes, limit_bytes, keep=()):
         # Validation and the device fence happen before retirement. Preserve
         # allocator relief for clean growth failures after unowned pages retire.
         desired = self.residency._validate(desired)
+        if keep:
+            keep = self.residency._validate(keep)
+            # Speculatively mapped pages are not required yet, but retiring
+            # them here would throw away the work the prefetcher just did.
+            protected = {key: desired[key] | keep[key] for key in desired}
+        else:
+            protected = desired
         if spare_bytes:
             if self.spare_cache is None:
                 self.spare_cache = SparePageCache()
             target = self.spare_cache.select(self.residency.storages,
-                self.residency.mapped, desired, spare_bytes, limit_bytes)
+                self.residency.mapped, protected, spare_bytes, limit_bytes)
         else:
             if self.spare_cache is not None:
                 self.spare_cache.clear()
-            target = desired
+            target = protected
         # Serialized residency owns the mapping ledger. An unchanged target
         # needs neither a VMM operation nor another pair of full page walks.
         # Validate first so poisoned state and invalid offsets still fail.
@@ -113,7 +133,9 @@ class NativeStorageArena:
             try:
                 # Do not flush the torch allocator while disposable spare
                 # pages could satisfy our own growth. Drop those first.
-                grown = self._timed('ensure_with_spares', self.residency.ensure, target)
+                # Initialize only the required set: spare and prefetched pages
+                # are already zeroed or intentionally left to their consumer.
+                grown = self._timed('ensure_with_spares', self.residency.ensure, desired)
             except RuntimeError as error:
                 if self.residency.poisoned or not str(error).startswith('capacity_exhausted:'):
                     raise

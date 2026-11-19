@@ -28,7 +28,8 @@ class NativeResidencyScheduler(Scheduler):
                                   None if prefix is None else int(prefix))
             self._native_admission = NativeAdmission(
                 self.kv_cache_manager, get_group_id, executor.collective_rpc,
-                range(executor.world_size), budget)
+                range(executor.world_size), budget,
+                in_process=getattr(executor, 'in_process', False))
             executor.native_admission = self._native_admission
             self._native_admission.reconcile()
 
@@ -42,6 +43,10 @@ class NativeResidencyScheduler(Scheduler):
         finally:
             if admission is not None:
                 admission.end_schedule()
+        if admission is not None:
+            # Predicted map-only work for the next step runs on the admission's
+            # prefetch thread while this step executes; it never blocks here.
+            admission.pipeline_prepare()
         self._kvcached_epoch += 1
         # The pinned multiprocess executor pickles SchedulerOutput, including
         # this side channel. Workers reject a missing/stale side channel rather

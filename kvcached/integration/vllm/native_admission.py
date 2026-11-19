@@ -10,6 +10,7 @@ This conservative first implementation prioritizes safety over packing density.
 
 import inspect
 import os
+import threading
 import time
 from copy import deepcopy
 from dataclasses import replace
@@ -26,7 +27,7 @@ class _AdmissionMiss(Exception):
 
 
 class NativeAdmission:
-    def __init__(self, manager, decode_group, rpc, ranks, budget):
+    def __init__(self, manager, decode_group, rpc, ranks, budget, *, in_process=False):
         self.manager = manager
         self.coordinator = manager.coordinator
         self.pool = self.coordinator.block_pool
@@ -34,6 +35,7 @@ class NativeAdmission:
         self.rpc = rpc
         self.ranks = tuple(ranks)
         self.budget = budget
+        self.in_process = bool(in_process)
         self.ticket = 0
         self.epoch = 0
         self.step_candidates = set()
@@ -61,6 +63,25 @@ class NativeAdmission:
         self._grant = None
         self._step_warm = set()
         self._warm_attempted = False
+        # Cross-step prepare pipeline: map the free-queue head for the next
+        # step on a background thread while the engine executes the current
+        # one. Map-only, so the worker never fences or retires here.
+        self.pipeline_prepare_enabled = (
+            os.getenv('KVCACHED_NATIVE_PIPELINE_PREPARE') == '1'
+            and self.in_process)
+        try:
+            self.pipeline_blocks = max(0, int(os.getenv(
+                'KVCACHED_NATIVE_PREFETCH_BLOCKS', '8')))
+        except ValueError:
+            self.pipeline_blocks = 8
+        self.counters.setdefault('prefetch_calls', 0)
+        self.counters.setdefault('prefetch_errors', 0)
+        self._prefetch_ticket = 0
+        self._prefetch_thread = None
+        self._prefetch_stop = threading.Event()
+        self._prefetch_wake = threading.Event()
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_pending = None
         self._install()
 
     def _timed(self, name, function, *args, **kwargs):
@@ -327,6 +348,52 @@ class NativeAdmission:
             admission_counters=dict(self.counters),
             admission_profile=deepcopy(self.profile),
         )
+
+    def pipeline_prepare(self):
+        """Arm a map-only prepare for the next step and return immediately."""
+        if not self.pipeline_prepare_enabled or self.pipeline_blocks <= 0:
+            return 0
+        try:
+            free = self.pool.free_block_queue.get_all_free_blocks()
+        except Exception:  # a queue change during a step is not an error
+            return 0
+        candidates = []
+        for block in free:
+            if block.is_null or block.ref_cnt:
+                continue
+            candidates.append(block.block_id)
+            if len(candidates) >= self.pipeline_blocks:
+                break
+        if not candidates:
+            return 0
+        self._prefetch_ticket += 1
+        job = (self._prefetch_ticket, tuple(candidates), self.budget.as_dict())
+        with self._prefetch_lock:
+            # Latest step wins; a stale prediction is worthless.
+            self._prefetch_pending = job
+        if self._prefetch_thread is None:
+            self._prefetch_thread = threading.Thread(
+                target=self._prefetch_loop, name='native-prepare-pipeline',
+                daemon=True)
+            self._prefetch_thread.start()
+        self._prefetch_wake.set()
+        return len(candidates)
+
+    def _prefetch_loop(self):
+        while not self._prefetch_stop.is_set():
+            self._prefetch_wake.wait(0.5)
+            self._prefetch_wake.clear()
+            with self._prefetch_lock:
+                job = self._prefetch_pending
+                self._prefetch_pending = None
+            if job is None:
+                continue
+            ticket, candidates, budget = job
+            try:
+                self.counters['prefetch_calls'] += 1
+                self.rpc('kvcached_native_prefetch', args=(candidates, budget, ticket))
+            except Exception:  # speculative path never fails the engine
+                self.counters['prefetch_errors'] += 1
 
     def _install(self):
         pool, manager, coordinator = self.pool, self.manager, self.coordinator

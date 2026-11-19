@@ -19,6 +19,11 @@ class PhysicalResidency:
         self.storages = {}
         self.pool_ids = {}
         self.mapped = {}
+        # Pages mapped by a speculative prepare are not zeroed until a worker
+        # actually consumes the block. Keeping them in a separate set lets a
+        # later ensure() initialize them exactly once and lets prefetch stay a
+        # map-only, fence-free operation.
+        self.uninitialized = {}
         self.poisoned = False
         self.grown_bytes = 0
         self.reclaimed_bytes = 0
@@ -34,6 +39,7 @@ class PhysicalResidency:
         self.storages[storage.key] = storage
         self.pool_ids[storage.key] = pool_id
         self.mapped[storage.key] = set()
+        self.uninitialized[storage.key] = set()
 
     def full(self):
         return {key: set(range(0, storage.reservation_bytes, storage.page_bytes))
@@ -71,8 +77,14 @@ class PhysicalResidency:
                     raise RuntimeError("VMM and page ledger disagree")
                 added[key] = set(attached)
                 self.mapped[key].update(attached)
-            for key, pages in added.items():
+                self.uninitialized[key].update(attached)
+            pending = {key: sorted(pages & self.uninitialized[key])
+                       for key, pages in desired.items()}
+            pending = {key: pages for key, pages in pending.items() if pages}
+            for key, pages in pending.items():
                 self._stage('initialize', self.initialize, key, pages)
+            for key, pages in pending.items():
+                self.uninitialized[key].difference_update(pages)
         except Exception as error:
             # Backend quarantine means a map or its rollback has uncertain
             # state. Rolling back other newly added pages does not repair it.
@@ -88,11 +100,40 @@ class PhysicalResidency:
                                        sorted(pages), self.pool_ids[key]):
                         raise RuntimeError("Failed to undo newly mapped pages")
                     self.mapped[key].difference_update(pages)
+                    self.uninitialized[key].difference_update(pages)
             except Exception as rollback:
                 self.poisoned = True
                 raise RuntimeError("Growth rollback failed; worker restart required") from rollback
             raise
         total = sum(len(pages) * self.storages[key].page_bytes for key, pages in added.items())
+        self.grown_bytes += total
+        return total
+
+    def prefetch(self, desired):
+        """Map pages ahead of use; initialization stays with the consumer.
+
+        Deliberately map-only: no device fence is performed here, so this may
+        run while the previous step still executes. Bytes are accounted in the
+        shared budget exactly like ensure(), and a consumer that later calls
+        ensure() also zeroes them through the uninitialized ledger.
+        """
+        desired = self._validate(desired)
+        total = 0
+        for key, target in desired.items():
+            missing = sorted(target - self.mapped[key])
+            if not missing:
+                continue
+            success, attached = self._stage(
+                'prefetch_map', self.operations.map_to_kv_tensors_with_result,
+                missing, self.pool_ids[key])
+            if not success:
+                raise MemoryError(f"Unable to back storage {key}")
+            if set(attached) != set(missing):
+                self.poisoned = True
+                raise RuntimeError("VMM and page ledger disagree")
+            self.mapped[key].update(attached)
+            self.uninitialized[key].update(attached)
+            total += len(attached) * self.storages[key].page_bytes
         self.grown_bytes += total
         return total
 
@@ -134,6 +175,7 @@ class PhysicalResidency:
                                    transaction, self.pool_ids[key]):
                     raise RuntimeError("Physical retirement commit failed")
                 self.mapped[key].difference_update(retiring[key])
+                self.uninitialized[key].difference_update(retiring[key])
         except Exception:
             # Released physical handles cannot be restored by inventing data.
             self.poisoned = True

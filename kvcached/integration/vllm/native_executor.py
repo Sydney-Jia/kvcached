@@ -57,6 +57,8 @@ def _budget_rpc(admission, method, args, kwargs, non_block, unique_reply_rank, e
 
 
 class NativeCapacityExecutor(MultiprocExecutor):
+    in_process = False
+
     def __init__(self, vllm_config, *args, **kwargs):
         _validate_serialized_single_dp(vllm_config)
         self.native_admission = None
@@ -98,6 +100,7 @@ class NativeCapacityUniProcExecutor(UniProcExecutor):
     """
 
     world_size = 1
+    in_process = True
 
     def __init__(self, vllm_config, *args, **kwargs):
         _validate_serialized_single_dp(vllm_config)
