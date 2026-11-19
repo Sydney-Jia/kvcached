@@ -119,6 +119,7 @@ class NativeCapacityUniProcExecutor(UniProcExecutor):
         args=(),
         kwargs=None,
         non_block=False,
+        single_value=False,
         unique_reply_rank=None,
         **extra,
     ):
@@ -136,4 +137,5 @@ class NativeCapacityUniProcExecutor(UniProcExecutor):
             args=args,
             kwargs=kwargs,
             non_block=non_block,
+            single_value=single_value,
         )
