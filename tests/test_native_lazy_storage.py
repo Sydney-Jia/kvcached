@@ -5,6 +5,7 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace as NS
 from uuid import uuid4
+import json
 import os
 import threading
 import time
@@ -45,6 +46,7 @@ namespace = dict(
     os=os,
     threading=threading,
     time=time,
+    json=json,
     uuid4=uuid4,
     Storage=residency.Storage,
     PhysicalResidency=physical.PhysicalResidency,
@@ -139,6 +141,7 @@ class LazyStorageTests(unittest.TestCase):
         os.environ["KVCACHED_NATIVE_RETIRE_ASYNC"] = "1"
         os.environ["KVCACHED_NATIVE_RETIRE_UTILIZATION"] = "0"
         os.environ["KVCACHED_NATIVE_RETIRE_INTERVAL_S"] = "0.05"
+        os.environ["KVCACHED_NATIVE_RETIRE_GRACE_S"] = "0"
         try:
             arena, memory = self.arena(True)
             arena.allocate(4096)
@@ -152,7 +155,8 @@ class LazyStorageTests(unittest.TestCase):
         finally:
             for name in ("KVCACHED_NATIVE_RETIRE_ASYNC",
                          "KVCACHED_NATIVE_RETIRE_UTILIZATION",
-                         "KVCACHED_NATIVE_RETIRE_INTERVAL_S"):
+                         "KVCACHED_NATIVE_RETIRE_INTERVAL_S",
+                         "KVCACHED_NATIVE_RETIRE_GRACE_S"):
                 del os.environ[name]
 
 

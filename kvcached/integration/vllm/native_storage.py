@@ -70,6 +70,15 @@ class NativeStorageArena:
         except ValueError:
             self.retire_target = 0.7
         try:
+            self.retire_grace_s = max(0.0, float(os.getenv(
+                'KVCACHED_NATIVE_RETIRE_GRACE_S', '3.0')))
+        except ValueError:
+            self.retire_grace_s = 3.0
+        # Admission publishes a new candidate set every step. Retiring pages
+        # the moment they leave one set would unmap what the next admission
+        # maps again, so keep a short grace window of recently published sets.
+        self._recent_targets = []
+        try:
             self.retire_batch_bytes = max(2 * 1024 * 1024, int(os.getenv(
                 'KVCACHED_NATIVE_RETIRE_BATCH_BYTES', str(4 * 1024 * 1024))))
         except ValueError:
@@ -80,6 +89,8 @@ class NativeStorageArena:
         self._retire_stop = threading.Event()
         self.retire_chunks = 0
         self.retired_bytes_async = 0
+        self._last_retire_ns = 0
+        self._retire_report_at = 0.0
 
     def _timed(self, name, function, *args):
         if not self.profile_enabled:
@@ -139,8 +150,34 @@ class NativeStorageArena:
             desired = self.residency._validate(desired)
             if publish or self._latest_required is None:
                 self._latest_required = desired
+                self._remember_target(desired)
             self._start_retire_thread()
             return self._timed('grow', self.residency.ensure, desired)
+
+    def _remember_target(self, target):
+        now = time.monotonic()
+        if self.retire_grace_s > 0:
+            deadline = now + self.retire_grace_s
+            self._recent_targets.append((deadline, target))
+            if len(self._recent_targets) > 32:
+                self._recent_targets = [
+                    (deadline, pages) for deadline, pages in self._recent_targets
+                    if deadline > now][-16:]
+
+    def _protected_target(self):
+        """Latest owners plus every set published inside the grace window."""
+        now = time.monotonic()
+        protected = {key: set() for key in self.residency.mapped}
+        if self.retire_grace_s > 0:
+            self._recent_targets = [
+                (deadline, pages) for deadline, pages in self._recent_targets
+                if deadline > now]
+            for _, pages in self._recent_targets:
+                for key, offsets in pages.items():
+                    protected[key] |= offsets
+        for key, offsets in (self._latest_required or {}).items():
+            protected[key] |= offsets
+        return protected
 
     def defer_retire(self, desired):
         """Publish the current owner set for the background reclaimer."""
@@ -210,16 +247,29 @@ class NativeStorageArena:
 
     def _retire_once(self):
         with self._lock:
-            target = self._latest_required
-            if target is None:
+            if self._latest_required is None:
                 return 0
+            target = self._protected_target()
             chunk = self._select_retire_chunk(target, self.retire_batch_bytes)
             if not any(chunk.values()):
                 return 0
+            started = time.perf_counter_ns()
             reclaimed = self._timed('retire_async', self.residency.reclaim,
                                     target, chunk)
+            self._last_retire_ns = time.perf_counter_ns() - started
         self.retire_chunks += 1
         self.retired_bytes_async += int(reclaimed)
+        now = time.monotonic()
+        if now - self._retire_report_at >= 30:
+            self._retire_report_at = now
+            print('KVCACHED_NATIVE_RETIRE_STATS ' + json.dumps(dict(
+                chunks=self.retire_chunks,
+                retired_bytes=self.retired_bytes_async,
+                last_ns=self._last_retire_ns,
+                mapped_bytes=sum(
+                    len(pages) * self.residency.storages[key].page_bytes
+                    for key, pages in self.residency.mapped.items()))),
+                flush=True)
         return reclaimed
 
     def _select_retire_chunk(self, target, limit):
