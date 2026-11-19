@@ -50,8 +50,14 @@ class NativeAdmission:
         self.profile_enabled = os.getenv('KVCACHED_NATIVE_PROFILE') == '1'
         self.profile = {}
         self.counters = dict(rpc_calls=0, grant_hits=0, batch_attempts=0,
-                             batch_fallbacks=0, snapshots=0, prefix_scans=0,
-                             candidate_queue_scans=0)
+                             batch_fallbacks=0, snapshots=0, snapshot_hits=0,
+                             prefix_scans=0, candidate_queue_scans=0)
+        # The scheduler asks for capacity several times per step, and every
+        # admission call needs the protected owner snapshot. The owner set only
+        # changes when blocks are allocated or prefixes are evicted, so one
+        # snapshot per such event is enough.
+        self._snapshot_cache = None
+        self._protected_cache = None
         self._grant = None
         self._step_warm = set()
         self._warm_attempted = False
@@ -68,16 +74,31 @@ class NativeAdmission:
             row['calls'] += 1
             row['host_ns'] += time.perf_counter_ns() - start
 
+    def _invalidate_snapshot(self):
+        """Drop the per-step snapshot after any ownership-visible mutation."""
+        self._snapshot_cache = None
+        self._protected_cache = None
+
     def _snapshot(self):
+        epoch = max(1, self.epoch)
+        cached = self._snapshot_cache
+        if cached is not None and cached.epoch == epoch:
+            self.counters['snapshot_hits'] += 1
+            return cached
         self.counters['snapshots'] += 1
-        return self._timed('snapshot', snapshot_ownership,
+        snapshot = self._timed('snapshot', snapshot_ownership,
             self.coordinator,
             SimpleNamespace(new_block_ids_to_zero=(), kv_cache_block_copies=()),
-            epoch=max(1, self.epoch),
+            epoch=epoch,
             decode_group=self.decode_group,
         )
+        self._snapshot_cache = snapshot
+        return snapshot
 
     def _protected_snapshot(self):
+        cached = self._protected_cache
+        if cached is not None and cached.epoch == max(1, self.epoch):
+            return cached
         snapshot = self._snapshot()
         # A native allocation can stage a copy and release its source before
         # SchedulerOutput publishes copy endpoints. Preserve the start-of-step
@@ -87,7 +108,9 @@ class NativeAdmission:
             key: tuple(sorted(set(value) | self.step_base.get(key, set())))
             for key, value in snapshot.owners.items()
         }
-        return replace(snapshot, owners=owners)
+        protected = replace(snapshot, owners=owners)
+        self._protected_cache = protected
+        return protected
 
     @staticmethod
     def _coverage(snapshot, candidates):
@@ -184,12 +207,15 @@ class NativeAdmission:
         if selected:
             self.pool.evict_blocks(selected)
             self.evicted_prefix_blocks += len(selected)
+            # Prefix hashes are owners; the cached snapshot no longer matches.
+            self._invalidate_snapshot()
         return len(selected)
 
     def begin_step(self, epoch):
         if self.in_schedule:
             raise RuntimeError("Native admission does not support queued scheduling")
         self.epoch = epoch
+        self._invalidate_snapshot()
         self._grant = None
         self._step_warm.clear()
         self._warm_attempted = False
@@ -261,6 +287,7 @@ class NativeAdmission:
         self._grant = None
         self._step_warm.clear()
         self.step_base = {}
+        self._invalidate_snapshot()
         self.evict_prefixes(pressure=pressure)
         if not self._prepare(set()):
             raise RuntimeError("Existing native owners lost their backing")
@@ -370,6 +397,8 @@ class NativeAdmission:
                 return original_new(count)
             finally:
                 self.inside_get_new = False
+                # Allocated blocks change request ownership and refcounts.
+                self._invalidate_snapshot()
 
         @wraps(original_allocate)
         def allocate(*args, **kwargs):
