@@ -202,19 +202,50 @@ class NativeAdmission:
             self._grant = (scope, coverage)
         return success
 
+    def _free_nodes(self):
+        """Iterate the free queue in LRU order without copying it.
+
+        ``get_all_free_blocks()`` materializes the whole queue; the linked
+        list is already ordered, so walk it. Fall back to the materialized
+        list when the queue implementation does not expose the list links.
+        """
+        queue = self.pool.free_block_queue
+        head = getattr(queue, 'fake_free_list_head', None)
+        tail = getattr(queue, 'fake_free_list_tail', None)
+        if head is None or tail is None:
+            yield from queue.get_all_free_blocks()
+            return
+        node = head.next_free_block
+        while node is not None and node is not tail:
+            yield node
+            node = node.next_free_block
+
+    def _free_head(self, count, exclude=()):
+        """The first ``count`` allocatable block ids."""
+        if count <= 0:
+            return []
+        exclude = set(exclude)
+        ids = []
+        for node in self._free_nodes():
+            if not node.is_null and node.block_id not in exclude:
+                ids.append(node.block_id)
+                if len(ids) >= count:
+                    break
+        return ids
+
     def _eligible_prefixes(self, exclude=()):
         self.counters['prefix_scans'] += 1
         exclude = set(exclude)
         aliases = self.pool.cached_block_hashes_by_block
-        return [
-            block
-            for block in self.pool.free_block_queue.get_all_free_blocks()
-            if block.block_id not in exclude
-            and not block.is_null
-            and block.ref_cnt == 0
-            and block.block_id not in self.pool._reuse_watchers
-            and (block.block_hash is not None or aliases.get(block.block_id))
-        ]
+        eligible = []
+        for node in self._free_nodes():
+            if (not node.is_null and node.ref_cnt == 0
+                    and node.block_id not in exclude
+                    and node.block_id not in self.pool._reuse_watchers
+                    and (node.block_hash is not None
+                         or aliases.get(node.block_id))):
+                eligible.append(node)
+        return eligible
 
     def evict_prefixes(self, *, pressure=False, exclude=()):
         cap = self.budget.prefix_max_blocks
@@ -438,9 +469,7 @@ class NativeAdmission:
             candidates = []
             if needed:
                 self.counters['candidate_queue_scans'] += 1
-                free = pool.free_block_queue.get_all_free_blocks()
-                candidates = list(islice(
-                    (block.block_id for block in free if block.block_id not in hits), needed))
+                candidates = self._free_head(needed, hits)
             if self.try_admit(candidates, hits | context["sources"]):
                 return logical
             # Zero demand can still touch a cached block in a different native
@@ -450,9 +479,7 @@ class NativeAdmission:
         @wraps(original_new)
         def get_new(count):
             if self.context is not None:
-                actual = [] if count == 0 else [
-                    block.block_id for block in pool.free_block_queue.get_all_free_blocks()[:count]
-                ]
+                actual = self._free_head(count)
                 if not set(actual) <= self.step_candidates:
                     # Fail before mutating the pool. A changed native allocation
                     # order needs an adapter update, not an unsafe late mapping.
