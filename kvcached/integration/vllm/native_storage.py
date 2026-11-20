@@ -38,6 +38,16 @@ class NativeStorageArena:
         self.spare_retries = 0
         self.profile_enabled = os.getenv('KVCACHED_NATIVE_PROFILE') == '1'
         self.profile = {}
+        # Periodic stage dump: the profile is otherwise only visible through a
+        # status RPC, so a throughput run has no attribution at all.
+        try:
+            self.profile_dump_s = float(os.getenv(
+                'KVCACHED_NATIVE_PROFILE_DUMP_S', '60'))
+        except ValueError:
+            self.profile_dump_s = 60.0
+        if self.profile_enabled and self.profile_dump_s > 0:
+            threading.Thread(target=self._profile_loop, name='native-profile',
+                             daemon=True).start()
         self._complete = synchronize
         self.residency = PhysicalResidency(
             operations, self._synchronize, self._initialize,
@@ -100,6 +110,20 @@ class NativeStorageArena:
         self.retired_bytes_async = 0
         self._last_retire_ns = 0
         self._retire_report_at = 0.0
+
+    def _profile_loop(self):
+        while True:
+            time.sleep(self.profile_dump_s)
+            try:
+                rows = {name: dict(calls=row['calls'],
+                                   ms=round(row['host_ns'] / 1e6, 1))
+                        for name, row in list(self.profile.items())}
+                print('KVCACHED_NATIVE_PROFILE_DUMP ' + json.dumps(
+                    dict(instance=self.instance_name, stages=rows,
+                         mapped_bytes=self.residency.status()['mapped_bytes'])),
+                    flush=True)
+            except Exception:
+                pass
 
     def _timed(self, name, function, *args):
         if not self.profile_enabled:
