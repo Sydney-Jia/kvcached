@@ -203,7 +203,19 @@ class NativeElasticWorker(NPUWorker):
 
     def compile_or_warm_up_model(self):
         if not self.native_capacity_enabled:
-            return super().compile_or_warm_up_model()
+            result = super().compile_or_warm_up_model()
+            if self.native_arena is None:
+                return result
+            # Warmup and graph capture map a dummy batch. Capacity mode retires
+            # those pages below; elastic mode must do the same or the resident
+            # dummy pages starve a second engine on the same card.
+            self.native_arena.transition(
+                {key: set() for key in self.native_arena.residency.storages})
+            print('KVCACHED_NATIVE_STARTUP_RECLAIM ' + json.dumps(dict(
+                rank=self.rank,
+                mapped_bytes=self.native_arena.residency.status()['mapped_bytes'])),
+                flush=True)
+            return result
         # Capture must not grow storage while recording a graph. The native
         # MRV2 dummy contract uses null and state slots 1..max_num_reqs; back
         # them before entering warmup/capture, independently of virtual size.
