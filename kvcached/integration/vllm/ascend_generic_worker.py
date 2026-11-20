@@ -211,10 +211,17 @@ class NativeElasticWorker(NPUWorker):
             # dummy pages starve a second engine on the same card.
             self.native_arena.transition(
                 {key: set() for key in self.native_arena.residency.storages})
+            # Profiling also leaves allocator-cached blocks. Return them before
+            # the second engine measures its own pool; nothing is running yet.
+            try:
+                torch.npu.empty_cache()
+            except Exception:
+                pass
+            free, _ = torch.npu.mem_get_info()
             print('KVCACHED_NATIVE_STARTUP_RECLAIM ' + json.dumps(dict(
                 rank=self.rank,
-                mapped_bytes=self.native_arena.residency.status()['mapped_bytes'])),
-                flush=True)
+                mapped_bytes=self.native_arena.residency.status()['mapped_bytes'],
+                device_free_bytes=int(free))), flush=True)
             return result
         # Capture must not grow storage while recording a graph. The native
         # MRV2 dummy contract uses null and state slots 1..max_num_reqs; back
