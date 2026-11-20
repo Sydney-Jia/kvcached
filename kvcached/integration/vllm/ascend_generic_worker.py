@@ -282,13 +282,7 @@ class NativeElasticWorker(NPUWorker):
                 # unmaps the candidates the next admission maps again. Under
                 # shared-budget pressure, though, the peer engine needs those
                 # pages back, so release them exactly as the base protocol did.
-                if self._budget_pressure():
-                    self._transition_native(required, snapshot)
-                else:
-                    # Quiet step: map only, and leave retirement to the idle
-                    # reclaimer. publish=False keeps admission's candidate set
-                    # as the retirement target so nothing is unmapped twice.
-                    self.native_arena.grow(required, publish=False)
+                self._elastic_residency(required, snapshot)
                 self._trace_residency('reclaim-complete')
             else:
                 self.native_arena.ensure(required)
@@ -382,6 +376,34 @@ class NativeElasticWorker(NPUWorker):
         # Idle engines, explicit budget changes and partial-grant rollback
         # must converge without another request or an expiry timer.
         return self.native_arena.transition(required, keep=keep)
+
+    def _elastic_residency(self, required, snapshot):
+        """Back an elastic step, surviving a peer-held shared budget.
+
+        Without the capacity protocol nothing retries a physical rejection, so
+        a peer holding the ledger would kill the engine. Reclaim our own
+        unowned pages and wait briefly for the peer's release instead.
+        """
+        try:
+            if self._budget_pressure():
+                return self._transition_native(required, snapshot)
+            # Quiet step: map only and leave retirement to the idle reclaimer.
+            # publish=False keeps admission's candidate set as the retirement
+            # target so nothing is unmapped twice.
+            return self.native_arena.grow(required, publish=False)
+        except RuntimeError as error:
+            if not is_capacity_rejection(error):
+                raise
+        budget_deadline = time.monotonic() + float(os.getenv(
+            'KVCACHED_NATIVE_ELASTIC_WAIT_S', '10'))
+        while time.monotonic() < budget_deadline:
+            time.sleep(0.05)
+            try:
+                return self.native_arena.transition(required)
+            except RuntimeError as error:
+                if not is_capacity_rejection(error):
+                    raise
+        raise RuntimeError('elastic residency waited for the shared KV budget')
 
     def _budget_pressure(self):
         """Whether the shared ledger is tight enough to justify a fence.
