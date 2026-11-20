@@ -388,9 +388,13 @@ class NativeElasticWorker(NPUWorker):
             if self._budget_pressure():
                 return self._transition_native(required, snapshot)
             # Quiet step: map only and leave retirement to the idle reclaimer.
-            # publish=False keeps admission's candidate set as the retirement
-            # target so nothing is unmapped twice.
-            return self.native_arena.grow(required, publish=False)
+            # Without admission the execution owner set is the only retirement
+            # target there is, so it must be published every step; a stale
+            # target lets the reclaimer unmap pages a running request still
+            # uses, which faults the device. With admission, its candidate set
+            # stays authoritative and execution must not shrink it.
+            return self.native_arena.grow(
+                required, publish=not self.native_capacity_enabled)
         except RuntimeError as error:
             if not is_capacity_rejection(error):
                 raise
