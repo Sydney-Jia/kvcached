@@ -9,6 +9,7 @@ This experimental entry point reports evidence, not a universal support claim.
 
 import json
 import os
+import threading
 import time
 from contextlib import nullcontext
 from functools import wraps
@@ -45,7 +46,11 @@ class NativeElasticWorker(NPUWorker):
         self.native_owners = None
         self.native_epoch = 0
         self.native_capacity_enabled = os.getenv('KVCACHED_NATIVE_CAPACITY') == '1'
-        self.native_elastic = self.native_capacity_enabled
+        # Sparse physical mapping is a residency property, not an admission
+        # property: an elastic deployment without the capacity protocol must
+        # still be able to reserve the pool and map pages on demand.
+        self.native_lazy_storage = os.getenv('KVCACHED_NATIVE_LAZY_STORAGE') == '1'
+        self.native_elastic = self.native_capacity_enabled or self.native_lazy_storage
         limit = os.getenv('KVCACHED_NATIVE_LIMIT_BYTES')
         prefix = os.getenv('KVCACHED_NATIVE_PREFIX_BLOCKS')
         self.native_budget = NativeBudgetState(NativeBudget(
@@ -54,13 +59,33 @@ class NativeElasticWorker(NPUWorker):
         self.native_spare_bytes = int(os.getenv('KVCACHED_NATIVE_SPARE_BYTES', '0'))
         if self.native_spare_bytes < 0:
             raise ValueError('KVCACHED_NATIVE_SPARE_BYTES must be nonnegative')
+        # Speculative map-only pages for the next scheduling step. They are
+        # protected from retirement until they are consumed or expire, and a
+        # prefetch thread may touch them while the engine executes.
+        self.native_prefetch_blocks = {}
+        self.native_prefetch_ticket = 0
+        self.native_prefetch_lock = threading.Lock()
+        try:
+            self.native_prefetch_bytes = max(0, int(os.getenv(
+                'KVCACHED_NATIVE_PREFETCH_BYTES', str(512 << 20))))
+        except ValueError:
+            self.native_prefetch_bytes = 512 << 20
+        try:
+            self.native_prefetch_ttl_s = float(os.getenv(
+                'KVCACHED_NATIVE_PREFETCH_TTL_S', '30') or 0)
+        except ValueError:
+            self.native_prefetch_ttl_s = 30.0
         if self.native_capacity_enabled:
             if (config.parallel_config.data_parallel_size != 1
                     or config.max_concurrent_batches != 1):
                 raise ValueError('Capacity mode requires single-DP serialized execution')
             backend = config.parallel_config.distributed_executor_backend
-            if not (isinstance(backend, str) and backend.endswith('.NativeCapacityExecutor')):
-                raise ValueError('Select the explicit NativeCapacityExecutor for capacity mode')
+            explicit = isinstance(backend, str) and backend.endswith(
+                ('.NativeCapacityExecutor', '.NativeCapacityUniProcExecutor'))
+            if not explicit:
+                raise ValueError(
+                    'Select the explicit NativeCapacityExecutor or '
+                    'NativeCapacityUniProcExecutor for capacity mode')
         self.native_steps = 0
         self.native_mapped_revision = -1
         self.native_graph_replays = 0
@@ -109,7 +134,7 @@ class NativeElasticWorker(NPUWorker):
         print('KVCACHED_NATIVE_ALLOCATOR_HANDOFF ' + json.dumps(
             dict(rank=self.rank, before=before, after=after)), flush=True)
         arena = NativeStorageArena(self.device, vmm_ops, self._residency_fence,
-                                   lazy=self.native_capacity_enabled)
+                                   lazy=self.native_elastic)
         allocate = attn_utils._allocate_kv_cache
         reshape = attn_utils._reshape_kv_cache_v2
         allocations = 0
@@ -178,7 +203,19 @@ class NativeElasticWorker(NPUWorker):
 
     def compile_or_warm_up_model(self):
         if not self.native_capacity_enabled:
-            return super().compile_or_warm_up_model()
+            result = super().compile_or_warm_up_model()
+            if self.native_arena is None:
+                return result
+            # Warmup and graph capture map a dummy batch. Capacity mode retires
+            # those pages below; elastic mode must do the same or the resident
+            # dummy pages starve a second engine on the same card.
+            self.native_arena.transition(
+                {key: set() for key in self.native_arena.residency.storages})
+            print('KVCACHED_NATIVE_STARTUP_RECLAIM ' + json.dumps(dict(
+                rank=self.rank,
+                mapped_bytes=self.native_arena.residency.status()['mapped_bytes'])),
+                flush=True)
+            return result
         # Capture must not grow storage while recording a graph. The native
         # MRV2 dummy contract uses null and state slots 1..max_num_reqs; back
         # them before entering warmup/capture, independently of virtual size.
@@ -252,9 +289,12 @@ class NativeElasticWorker(NPUWorker):
                        for key in required):
                     raise RuntimeError('Execution requires pages absent from native admission')
             if self.native_elastic:
-                # Full device completion fences all streams, including graph-update
-                # and state-copy streams. Optimize only after event coverage proof.
-                self._transition_native(required, snapshot)
+                # Admission materialized every required page on every rank, so
+                # a quiet step needs no transition at all: reclaiming here only
+                # unmaps the candidates the next admission maps again. Under
+                # shared-budget pressure, though, the peer engine needs those
+                # pages back, so release them exactly as the base protocol did.
+                self._elastic_residency(required, snapshot)
                 self._trace_residency('reclaim-complete')
             else:
                 self.native_arena.ensure(required)
@@ -262,20 +302,143 @@ class NativeElasticWorker(NPUWorker):
             self.native_mapped_revision = self.native_owners.revision
         self.native_epoch = snapshot.epoch
         self.native_steps += 1
+        if scheduler_output.total_num_scheduled_tokens:
+            note_activity = getattr(self.native_arena, 'note_activity', None)
+            if note_activity is not None:
+                note_activity()
         self._trace_residency('native-execute-enter')
         result = super().execute_model(scheduler_output)
         self._trace_residency('native-execute-return')
         return result
 
+    def _live_prefetch(self, now=None):
+        """Pages held by unexpired speculative blocks, plus their pairs."""
+        registry = getattr(self, 'native_prefetch_blocks', None)
+        if not registry:
+            return (), {}
+        now = time.monotonic() if now is None else now
+        with self.native_prefetch_lock:
+            expired = [block for block, deadline in registry.items()
+                       if deadline <= now]
+            for block in expired:
+                registry.pop(block, None)
+            blocks = tuple(registry)
+        if not blocks:
+            return (), {}
+        layout = self.native_owners.layout
+        pairs = tuple((group, block) for group in layout.groups for block in blocks)
+        return pairs, layout.pages_for(pairs)
+
+    def kvcached_native_prefetch(self, candidate_ids, budget, ticket):
+        """Map predicted candidates ahead of the next step; never initialized.
+
+        Runs on the admission's prefetch thread while the engine executes the
+        previous step. Mapping only, so it issues no device fence and no
+        retirement; failures are reported and dropped, never fatal.
+        """
+        response = dict(rank=self.rank, ticket=ticket, ok=False)
+        if not self.native_capacity_enabled or self.native_arena is None:
+            response['skipped'] = 'disabled'
+            return response
+        if self.native_prefetch_bytes <= 0 or self.native_prefetch_ttl_s <= 0:
+            response['skipped'] = 'off'
+            return response
+        try:
+            if type(ticket) is not int or ticket <= self.native_prefetch_ticket:
+                raise ValueError('Stale native prefetch ticket')
+            self.native_prefetch_ticket = ticket
+            if budget['revision'] != self.native_budget.budget.revision:
+                response['skipped'] = 'stale_budget'
+                return response
+            layout = self.native_owners.layout
+            limit = min(layout.block_counts.values())
+            blocks = sorted({int(block) for block in candidate_ids
+                             if 0 <= int(block) < limit})
+            if not blocks:
+                response['skipped'] = 'empty'
+                return response
+            pairs = tuple((group, block) for group in layout.groups
+                          for block in blocks)
+            pages = layout.pages_for(pairs)
+            storage = self.native_arena.residency.storages
+            size = sum(len(offsets) * storage[key].page_bytes
+                       for key, offsets in pages.items())
+            response['bytes'] = size
+            if size <= 0 or size > self.native_prefetch_bytes:
+                response['skipped'] = 'bytes'
+                return response
+            mapped = self.native_arena.prefetch(pages)
+            deadline = time.monotonic() + self.native_prefetch_ttl_s
+            with self.native_prefetch_lock:
+                for block in blocks:
+                    self.native_prefetch_blocks[block] = deadline
+            response.update(ok=True, mapped_bytes=mapped, blocks=len(blocks))
+            return response
+        except Exception as error:  # prefetch is best-effort
+            response['error'] = repr(error)[:160]
+            return response
+
     def _transition_native(self, required, snapshot, *, release_spares=False):
         reserve = getattr(self, 'native_spare_bytes', 0)
+        _, keep = self._live_prefetch()
         if (self.native_capacity_enabled and reserve and not release_spares
                 and snapshot.owners.get('requests')):
             return self.native_arena.transition(required, spare_bytes=reserve,
-                limit_bytes=self.native_budget.budget.limit_bytes)
+                limit_bytes=self.native_budget.budget.limit_bytes, keep=keep)
         # Idle engines, explicit budget changes and partial-grant rollback
         # must converge without another request or an expiry timer.
-        return self.native_arena.transition(required)
+        return self.native_arena.transition(required, keep=keep)
+
+    def _elastic_residency(self, required, snapshot):
+        """Back an elastic step, surviving a peer-held shared budget.
+
+        Without the capacity protocol nothing retries a physical rejection, so
+        a peer holding the ledger would kill the engine. Reclaim our own
+        unowned pages and wait briefly for the peer's release instead.
+        """
+        try:
+            if self._budget_pressure():
+                return self._transition_native(required, snapshot)
+            # Quiet step: map only and leave retirement to the idle reclaimer.
+            # Without admission the execution owner set is the only retirement
+            # target there is, so it must be published every step; a stale
+            # target lets the reclaimer unmap pages a running request still
+            # uses, which faults the device. With admission, its candidate set
+            # stays authoritative and execution must not shrink it.
+            return self.native_arena.grow(
+                required, publish=not self.native_capacity_enabled)
+        except RuntimeError as error:
+            if not is_capacity_rejection(error):
+                raise
+        budget_deadline = time.monotonic() + float(os.getenv(
+            'KVCACHED_NATIVE_ELASTIC_WAIT_S', '10'))
+        while time.monotonic() < budget_deadline:
+            time.sleep(0.05)
+            try:
+                return self.native_arena.transition(required)
+            except RuntimeError as error:
+                if not is_capacity_rejection(error):
+                    raise
+        raise RuntimeError('elastic residency waited for the shared KV budget')
+
+    def _budget_pressure(self):
+        """Whether the shared ledger is tight enough to justify a fence.
+
+        The base protocol reclaimed unowned pages on every execution step.
+        That keeps a peer engine growable but fences the device each step, so
+        only pay it once the mapped budget is close to exhausted.
+        """
+        try:
+            threshold = float(os.getenv(
+                'KVCACHED_NATIVE_EXEC_RECLAIM_UTILIZATION', '0.85'))
+            state = self.native_arena.operations.physical_budget_state()
+            budget = int(state.get('budget_bytes', 0) or 0)
+            charged = int(state.get('charged_bytes', 0) or 0)
+        except Exception:
+            return True
+        if budget <= 0:
+            return True
+        return charged >= budget * threshold
 
     def _native_status(self):
         arena = self.native_arena

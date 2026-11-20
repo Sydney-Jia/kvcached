@@ -10,6 +10,7 @@ This conservative first implementation prioritizes safety over packing density.
 
 import inspect
 import os
+import threading
 import time
 from copy import deepcopy
 from dataclasses import replace
@@ -26,7 +27,7 @@ class _AdmissionMiss(Exception):
 
 
 class NativeAdmission:
-    def __init__(self, manager, decode_group, rpc, ranks, budget):
+    def __init__(self, manager, decode_group, rpc, ranks, budget, *, in_process=False):
         self.manager = manager
         self.coordinator = manager.coordinator
         self.pool = self.coordinator.block_pool
@@ -34,6 +35,7 @@ class NativeAdmission:
         self.rpc = rpc
         self.ranks = tuple(ranks)
         self.budget = budget
+        self.in_process = bool(in_process)
         self.ticket = 0
         self.epoch = 0
         self.step_candidates = set()
@@ -50,11 +52,36 @@ class NativeAdmission:
         self.profile_enabled = os.getenv('KVCACHED_NATIVE_PROFILE') == '1'
         self.profile = {}
         self.counters = dict(rpc_calls=0, grant_hits=0, batch_attempts=0,
-                             batch_fallbacks=0, snapshots=0, prefix_scans=0,
-                             candidate_queue_scans=0)
+                             batch_fallbacks=0, snapshots=0, snapshot_hits=0,
+                             prefix_scans=0, candidate_queue_scans=0)
+        # The scheduler asks for capacity several times per step, and every
+        # admission call needs the protected owner snapshot. The owner set only
+        # changes when blocks are allocated or prefixes are evicted, so one
+        # snapshot per such event is enough.
+        self._snapshot_cache = None
+        self._protected_cache = None
         self._grant = None
         self._step_warm = set()
         self._warm_attempted = False
+        # Cross-step prepare pipeline: map the free-queue head for the next
+        # step on a background thread while the engine executes the current
+        # one. Map-only, so the worker never fences or retires here.
+        self.pipeline_prepare_enabled = (
+            os.getenv('KVCACHED_NATIVE_PIPELINE_PREPARE') == '1'
+            and self.in_process)
+        try:
+            self.pipeline_blocks = max(0, int(os.getenv(
+                'KVCACHED_NATIVE_PREFETCH_BLOCKS', '8')))
+        except ValueError:
+            self.pipeline_blocks = 8
+        self.counters.setdefault('prefetch_calls', 0)
+        self.counters.setdefault('prefetch_errors', 0)
+        self._prefetch_ticket = 0
+        self._prefetch_thread = None
+        self._prefetch_stop = threading.Event()
+        self._prefetch_wake = threading.Event()
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_pending = None
         self._install()
 
     def _timed(self, name, function, *args, **kwargs):
@@ -68,16 +95,31 @@ class NativeAdmission:
             row['calls'] += 1
             row['host_ns'] += time.perf_counter_ns() - start
 
+    def _invalidate_snapshot(self):
+        """Drop the per-step snapshot after any ownership-visible mutation."""
+        self._snapshot_cache = None
+        self._protected_cache = None
+
     def _snapshot(self):
+        epoch = max(1, self.epoch)
+        cached = self._snapshot_cache
+        if cached is not None and cached.epoch == epoch:
+            self.counters['snapshot_hits'] += 1
+            return cached
         self.counters['snapshots'] += 1
-        return self._timed('snapshot', snapshot_ownership,
+        snapshot = self._timed('snapshot', snapshot_ownership,
             self.coordinator,
             SimpleNamespace(new_block_ids_to_zero=(), kv_cache_block_copies=()),
-            epoch=max(1, self.epoch),
+            epoch=epoch,
             decode_group=self.decode_group,
         )
+        self._snapshot_cache = snapshot
+        return snapshot
 
     def _protected_snapshot(self):
+        cached = self._protected_cache
+        if cached is not None and cached.epoch == max(1, self.epoch):
+            return cached
         snapshot = self._snapshot()
         # A native allocation can stage a copy and release its source before
         # SchedulerOutput publishes copy endpoints. Preserve the start-of-step
@@ -87,7 +129,9 @@ class NativeAdmission:
             key: tuple(sorted(set(value) | self.step_base.get(key, set())))
             for key, value in snapshot.owners.items()
         }
-        return replace(snapshot, owners=owners)
+        protected = replace(snapshot, owners=owners)
+        self._protected_cache = protected
+        return protected
 
     @staticmethod
     def _coverage(snapshot, candidates):
@@ -158,19 +202,50 @@ class NativeAdmission:
             self._grant = (scope, coverage)
         return success
 
+    def _free_nodes(self):
+        """Iterate the free queue in LRU order without copying it.
+
+        ``get_all_free_blocks()`` materializes the whole queue; the linked
+        list is already ordered, so walk it. Fall back to the materialized
+        list when the queue implementation does not expose the list links.
+        """
+        queue = self.pool.free_block_queue
+        head = getattr(queue, 'fake_free_list_head', None)
+        tail = getattr(queue, 'fake_free_list_tail', None)
+        if head is None or tail is None:
+            yield from queue.get_all_free_blocks()
+            return
+        node = head.next_free_block
+        while node is not None and node is not tail:
+            yield node
+            node = node.next_free_block
+
+    def _free_head(self, count, exclude=()):
+        """The first ``count`` allocatable block ids."""
+        if count <= 0:
+            return []
+        exclude = set(exclude)
+        ids = []
+        for node in self._free_nodes():
+            if not node.is_null and node.block_id not in exclude:
+                ids.append(node.block_id)
+                if len(ids) >= count:
+                    break
+        return ids
+
     def _eligible_prefixes(self, exclude=()):
         self.counters['prefix_scans'] += 1
         exclude = set(exclude)
         aliases = self.pool.cached_block_hashes_by_block
-        return [
-            block
-            for block in self.pool.free_block_queue.get_all_free_blocks()
-            if block.block_id not in exclude
-            and not block.is_null
-            and block.ref_cnt == 0
-            and block.block_id not in self.pool._reuse_watchers
-            and (block.block_hash is not None or aliases.get(block.block_id))
-        ]
+        eligible = []
+        for node in self._free_nodes():
+            if (not node.is_null and node.ref_cnt == 0
+                    and node.block_id not in exclude
+                    and node.block_id not in self.pool._reuse_watchers
+                    and (node.block_hash is not None
+                         or aliases.get(node.block_id))):
+                eligible.append(node)
+        return eligible
 
     def evict_prefixes(self, *, pressure=False, exclude=()):
         cap = self.budget.prefix_max_blocks
@@ -184,12 +259,15 @@ class NativeAdmission:
         if selected:
             self.pool.evict_blocks(selected)
             self.evicted_prefix_blocks += len(selected)
+            # Prefix hashes are owners; the cached snapshot no longer matches.
+            self._invalidate_snapshot()
         return len(selected)
 
     def begin_step(self, epoch):
         if self.in_schedule:
             raise RuntimeError("Native admission does not support queued scheduling")
         self.epoch = epoch
+        self._invalidate_snapshot()
         self._grant = None
         self._step_warm.clear()
         self._warm_attempted = False
@@ -261,6 +339,7 @@ class NativeAdmission:
         self._grant = None
         self._step_warm.clear()
         self.step_base = {}
+        self._invalidate_snapshot()
         self.evict_prefixes(pressure=pressure)
         if not self._prepare(set()):
             raise RuntimeError("Existing native owners lost their backing")
@@ -300,6 +379,52 @@ class NativeAdmission:
             admission_counters=dict(self.counters),
             admission_profile=deepcopy(self.profile),
         )
+
+    def pipeline_prepare(self):
+        """Arm a map-only prepare for the next step and return immediately."""
+        if not self.pipeline_prepare_enabled or self.pipeline_blocks <= 0:
+            return 0
+        try:
+            free = self.pool.free_block_queue.get_all_free_blocks()
+        except Exception:  # a queue change during a step is not an error
+            return 0
+        candidates = []
+        for block in free:
+            if block.is_null or block.ref_cnt:
+                continue
+            candidates.append(block.block_id)
+            if len(candidates) >= self.pipeline_blocks:
+                break
+        if not candidates:
+            return 0
+        self._prefetch_ticket += 1
+        job = (self._prefetch_ticket, tuple(candidates), self.budget.as_dict())
+        with self._prefetch_lock:
+            # Latest step wins; a stale prediction is worthless.
+            self._prefetch_pending = job
+        if self._prefetch_thread is None:
+            self._prefetch_thread = threading.Thread(
+                target=self._prefetch_loop, name='native-prepare-pipeline',
+                daemon=True)
+            self._prefetch_thread.start()
+        self._prefetch_wake.set()
+        return len(candidates)
+
+    def _prefetch_loop(self):
+        while not self._prefetch_stop.is_set():
+            self._prefetch_wake.wait(0.5)
+            self._prefetch_wake.clear()
+            with self._prefetch_lock:
+                job = self._prefetch_pending
+                self._prefetch_pending = None
+            if job is None:
+                continue
+            ticket, candidates, budget = job
+            try:
+                self.counters['prefetch_calls'] += 1
+                self.rpc('kvcached_native_prefetch', args=(candidates, budget, ticket))
+            except Exception:  # speculative path never fails the engine
+                self.counters['prefetch_errors'] += 1
 
     def _install(self):
         pool, manager, coordinator = self.pool, self.manager, self.coordinator
@@ -344,9 +469,7 @@ class NativeAdmission:
             candidates = []
             if needed:
                 self.counters['candidate_queue_scans'] += 1
-                free = pool.free_block_queue.get_all_free_blocks()
-                candidates = list(islice(
-                    (block.block_id for block in free if block.block_id not in hits), needed))
+                candidates = self._free_head(needed, hits)
             if self.try_admit(candidates, hits | context["sources"]):
                 return logical
             # Zero demand can still touch a cached block in a different native
@@ -356,9 +479,7 @@ class NativeAdmission:
         @wraps(original_new)
         def get_new(count):
             if self.context is not None:
-                actual = [] if count == 0 else [
-                    block.block_id for block in pool.free_block_queue.get_all_free_blocks()[:count]
-                ]
+                actual = self._free_head(count)
                 if not set(actual) <= self.step_candidates:
                     # Fail before mutating the pool. A changed native allocation
                     # order needs an adapter update, not an unsafe late mapping.
@@ -370,6 +491,8 @@ class NativeAdmission:
                 return original_new(count)
             finally:
                 self.inside_get_new = False
+                # Allocated blocks change request ownership and refcounts.
+                self._invalidate_snapshot()
 
         @wraps(original_allocate)
         def allocate(*args, **kwargs):
@@ -403,10 +526,15 @@ class NativeAdmission:
             }
             # Conservative headroom: the native manager applies its watermark
             # only to some admissions; reserving it here may under-admit but
-            # cannot expose an unbacked slot.
-            headroom = values["reserved_blocks"]
-            if values["has_scheduled_reqs"]:
-                headroom += manager.watermark_blocks
+            # cannot expose an unbacked slot. get_new_blocks still takes the
+            # same free-queue head, so an exact candidate list covers every
+            # allocated slot; speculative extras only add map/retire churn.
+            if os.getenv('KVCACHED_NATIVE_EXACT_CANDIDATES', '0') == '1':
+                headroom = 0
+            else:
+                headroom = values["reserved_blocks"]
+                if values["has_scheduled_reqs"]:
+                    headroom += manager.watermark_blocks
             self.context = dict(demand=None, hits=hits, sources=sources, headroom=headroom)
             try:
                 return original_allocate(*args, **kwargs)

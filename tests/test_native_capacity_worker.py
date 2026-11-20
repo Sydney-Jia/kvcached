@@ -6,6 +6,7 @@ device stream, graph, or model behavior; those require the hardware matrix.
 """
 
 import ast
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace as NS
@@ -31,6 +32,7 @@ namespace = dict(
     NativeBudget=capacity.NativeBudget,
     NativeBudgetState=capacity.NativeBudgetState,
     is_capacity_rejection=relief.is_capacity_rejection,
+    os=os,
 )
 source = ROOT / "kvcached/integration/vllm/ascend_generic_worker.py"
 tree = ast.parse(source.read_text(encoding="utf-8"))
@@ -52,7 +54,14 @@ class WorkerTests(unittest.TestCase):
         pages.register(layout.storages["0"], 0)
         pages.ensure({"0": {0}})
         worker = Worker()
-        worker.native_arena = NS(residency=pages, transition=pages.transition, ensure=pages.ensure)
+        # The arena contract carries spare/keep policy arguments; the CPU fake
+        # only needs the physical page transition behind them.
+        worker.native_arena = NS(
+            residency=pages, ensure=pages.ensure, retire_async=False,
+            transition=lambda required, **_: pages.transition(required),
+            grow=lambda required, **_: pages.ensure(required),
+            defer_retire=lambda required: None,
+        )
         worker.native_owners = residency.ResidencyOwners(layout)
         worker.native_owners.replace({"null": ((0, 0), (1, 0))})
         worker.native_capacity_enabled = True
@@ -102,6 +111,27 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.execute(self.snapshot(((1, 1),))), "executed")
         self.assertEqual(self.memory.data[0][16], "live KV")
         self.assertEqual(self.worker.native_steps, 1)
+
+    def test_transition_is_synchronous_and_pressure_gates_execution(self):
+        calls = []
+        pages = self.worker.native_arena
+        self.worker.native_spare_bytes = 0
+
+        def transition(required, **kwargs):
+            calls.append("transition")
+            return dict(reclaimed_bytes=0, grown_bytes=0)
+
+        def state(charged):
+            return NS(physical_budget_state=lambda: dict(
+                budget_bytes=1000, charged_bytes=charged))
+
+        self.worker.native_arena = NS(
+            residency=pages.residency, operations=state(100), transition=transition)
+        self.worker._transition_native({"0": {0}}, self.snapshot())
+        self.assertEqual(calls, ["transition"])
+        self.assertFalse(self.worker._budget_pressure())
+        self.worker.native_arena.operations = state(900)
+        self.assertTrue(self.worker._budget_pressure())
 
     def test_unprepared_slot_never_launches_native_inference(self):
         with self.assertRaisesRegex(RuntimeError, "absent from native admission"):

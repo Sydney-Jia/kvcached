@@ -12,11 +12,19 @@ the kernels that previously consumed its state.
 
 from __future__ import annotations
 
+import json
+import os
+import threading
 from dataclasses import dataclass
 from collections import OrderedDict
 from itertools import product
 from math import prod
 from typing import Callable, Iterable, Mapping
+
+
+# Diagnostic only: re-expand every block and compare with the incremental
+# ledger. Never leave it on in a throughput run (it costs the full pass).
+_LEDGER_CHECK = os.getenv("KVCACHED_NATIVE_LEDGER_CHECK", "0").strip() == "1"
 
 
 def _integer(value: int, name: str, minimum: int = 0) -> int:
@@ -126,6 +134,9 @@ class Layout:
                  *, cache_page_entries: int = 65536):
         _integer(cache_page_entries, 'cache_page_entries')
         self.cache_page_entries = cache_page_entries
+        # A speculative prefetch expands candidate blocks from another thread
+        # while the engine thread keeps using the same immutable geometry.
+        self._cache_lock = threading.Lock()
         self._block_pages = OrderedDict()
         self._cached_offsets = 0
         self._cache_hits = 0
@@ -168,10 +179,12 @@ class Layout:
 
     def _pages_for_block(self, group, block):
         identity = (group, block)
-        if identity in self._block_pages:
-            self._cache_hits += 1
-            self._block_pages.move_to_end(identity)
-            return self._block_pages[identity]
+        with self._cache_lock:
+            cached = self._block_pages.get(identity)
+            if cached is not None:
+                self._cache_hits += 1
+                self._block_pages.move_to_end(identity)
+                return cached
         self._cache_misses += 1
         pages = {}
         for span in self.groups[group]:
@@ -186,11 +199,13 @@ class Layout:
         # byte offsets, never owners, physical mappings or prefix validity.
         # Bound by offset count as well as the finite group/block domain.
         if size <= self.cache_page_entries:
-            while self._block_pages and self._cached_offsets + size > self.cache_page_entries:
-                _, removed = self._block_pages.popitem(last=False)
-                self._cached_offsets -= sum(len(offsets) for _, offsets in removed)
-            self._block_pages[identity] = result
-            self._cached_offsets += size
+            with self._cache_lock:
+                while self._block_pages and self._cached_offsets + size > self.cache_page_entries:
+                    _, removed = self._block_pages.popitem(last=False)
+                    self._cached_offsets -= sum(len(offsets) for _, offsets in removed)
+                if identity not in self._block_pages:
+                    self._block_pages[identity] = result
+                    self._cached_offsets += size
         return result
 
     def cache_status(self):
@@ -213,8 +228,59 @@ class ResidencyOwners:
         self._owners: dict[str, frozenset[tuple[int, int]]] = {}
         self._executions: dict[str, tuple[frozenset[tuple[int, int]], Callable[[], bool]]] = {}
         self.revision = 0
-        self._pages_revision = -1
-        self._pages = None
+        # Page bookkeeping is incremental: one block can span hundreds of
+        # pages across tens of spans, so re-expanding every owner whenever a
+        # single block changes costs tens of milliseconds on each scheduler
+        # step. ``_pair_refs`` counts owners plus in-flight executions per
+        # (group, block); ``_page_refs`` counts references per physical page.
+        # Readers may run on another thread (idle reclaimer, admission
+        # prefetch), so every mutation and the page snapshot share one lock.
+        self._ledger_lock = threading.RLock()
+        self._pair_refs: dict[tuple[int, int], int] = {}
+        self._block_pages: dict[
+            tuple[int, int], tuple[tuple[str, tuple[int, ...]], ...]] = {}
+        self._page_refs: dict[str, dict[int, int]] = {}
+        self._required: dict[str, frozenset[int]] | None = None
+        self._required_dirty = True
+
+    def _pages_of_pair(self, pair: tuple[int, int]) -> tuple[tuple[str, tuple[int, ...]], ...]:
+        """Physical pages touched by one (group, block), expanded once."""
+        cached = self._block_pages.get(pair)
+        if cached is None:
+            pages = self.layout.pages_for((pair,))
+            cached = tuple((key, tuple(sorted(offsets)))
+                           for key, offsets in pages.items() if offsets)
+            self._block_pages[pair] = cached
+        return cached
+
+    def _acquire_pair(self, pair: tuple[int, int]) -> None:
+        count = self._pair_refs.get(pair, 0)
+        self._pair_refs[pair] = count + 1
+        if count:
+            return
+        for key, pages in self._pages_of_pair(pair):
+            refs = self._page_refs.setdefault(key, {})
+            for page in pages:
+                refs[page] = refs.get(page, 0) + 1
+        self._required_dirty = True
+
+    def _release_pair(self, pair: tuple[int, int]) -> None:
+        count = self._pair_refs.get(pair, 0)
+        if count > 1:
+            self._pair_refs[pair] = count - 1
+            return
+        self._pair_refs.pop(pair, None)
+        for key, pages in self._pages_of_pair(pair):
+            refs = self._page_refs.get(key)
+            if not refs:
+                continue
+            for page in pages:
+                remaining = refs.get(page, 0) - 1
+                if remaining > 0:
+                    refs[page] = remaining
+                else:
+                    refs.pop(page, None)
+        self._required_dirty = True
 
     @staticmethod
     def _check_owner(owner: str) -> None:
@@ -230,43 +296,87 @@ class ResidencyOwners:
             raise ValueError("Cannot remove and replace the same owner")
         validated = {owner: self.layout.validate_blocks(blocks)
                      for owner, blocks in updates.items()}
-        current = self._owners.copy()
-        for owner in remove:
-            if owner not in current:
-                raise ValueError(f"Cannot release unknown owner {owner!r}")
-            del current[owner]
-        current.update(validated)
-        if current != self._owners:
-            self._owners = current
-            self.revision += 1
+        with self._ledger_lock:
+            current = self._owners.copy()
+            for owner in remove:
+                if owner not in current:
+                    raise ValueError(f"Cannot release unknown owner {owner!r}")
+                del current[owner]
+            current.update(validated)
+            if current != self._owners:
+                for owner in set(self._owners) | set(current):
+                    old = self._owners.get(owner)
+                    new = current.get(owner)
+                    if old == new:
+                        continue
+                    if old:
+                        for pair in old - (new or frozenset()):
+                            self._release_pair(pair)
+                    if new:
+                        for pair in new - (old or frozenset()):
+                            self._acquire_pair(pair)
+                self._owners = current
+                self.revision += 1
 
     def begin_execution(self, identity: str, blocks: Iterable[tuple[int, int]],
                         completed: Callable[[], bool]) -> None:
         self._check_owner(identity)
         if identity in self._executions or not callable(completed):
             raise ValueError("Execution identity must be unique and completion callable")
-        self._executions[identity] = (self.layout.validate_blocks(blocks), completed)
-        self.revision += 1
+        validated = self.layout.validate_blocks(blocks)
+        with self._ledger_lock:
+            self._executions[identity] = (validated, completed)
+            for pair in validated:
+                self._acquire_pair(pair)
+            self.revision += 1
 
     def collect_completed(self) -> int:
         # Query all fences before mutating the ledger; a failed query leaves
         # every execution protected, including those queried earlier.
-        done = [key for key, (_, completed) in self._executions.items() if completed()]
-        for key in done:
-            del self._executions[key]
-        if done:
-            self.revision += 1
-        return len(done)
+        with self._ledger_lock:
+            done = [key for key, (_, completed)
+                    in self._executions.items() if completed()]
+            for key in done:
+                blocks, _ = self._executions.pop(key)
+                for pair in blocks:
+                    self._release_pair(pair)
+            if done:
+                self.revision += 1
+            return len(done)
+
+    def _full_pages(self) -> dict[str, frozenset[int]]:
+        """Reference implementation: expand every owned block from scratch."""
+        blocks = set().union(*self._owners.values()) if self._owners else set()
+        for blockset, _ in self._executions.values():
+            blocks.update(blockset)
+        return self.layout.pages_for(blocks)
 
     def required_pages(self) -> dict[str, frozenset[int]]:
-        if self._pages_revision == self.revision:
-            return dict(self._pages)
-        blocks = set().union(*self._owners.values())
-        for execution, _ in self._executions.values():
-            blocks.update(execution)
-        self._pages = self.layout.pages_for(blocks)
-        self._pages_revision = self.revision
-        return dict(self._pages)
+        with self._ledger_lock:
+            if self._required is None or self._required_dirty:
+                required = {key: frozenset(refs)
+                            for key, refs in self._page_refs.items() if refs}
+                for key in self.layout.storages:
+                    required.setdefault(key, frozenset())
+                if _LEDGER_CHECK:
+                    truth = self._full_pages()
+                    if any(truth[key] != required[key] for key in truth):
+                        print("KVCACHED_LEDGER_MISMATCH " + json.dumps({
+                            "extra": {key: sorted(set(required[key]) - truth[key])[:4]
+                                      for key in truth
+                                      if required[key] - truth[key]},
+                            "missing": {key: sorted(truth[key] - required[key])[:4]
+                                        for key in truth if truth[key] - required[key]},
+                            "owners": len(self._owners),
+                        }, sort_keys=True), flush=True)
+                        # Publishing the full set keeps a live request's pages
+                        # mapped; a mismatch must never retire them.
+                        required = truth
+                self._required = required
+                self._required_dirty = False
+            # Values are immutable frozensets; a shallow copy is enough to
+            # keep callers from adding storages to the cached mapping.
+            return dict(self._required)
 
     def snapshot(self) -> dict:
         return {"revision": self.revision, "owners": len(self._owners),

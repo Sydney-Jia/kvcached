@@ -18,12 +18,18 @@ class BaseExecutor:
         return ["native"]
 
 
-namespace = dict(MultiprocExecutor=BaseExecutor, _executors=WeakValueDictionary())
+class UniProcBase(BaseExecutor):
+    world_size = 1
+
+
+namespace = dict(MultiprocExecutor=BaseExecutor, UniProcExecutor=UniProcBase,
+                 _executors=WeakValueDictionary(),
+                 WeakValueDictionary=WeakValueDictionary)
 source = Path(__file__).parents[1] / "kvcached/integration/vllm/native_executor.py"
 nodes = [
     node
     for node in ast.parse(source.read_text(encoding="utf-8")).body
-    if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.Assign))
 ]
 exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
 
@@ -40,6 +46,11 @@ class ExecutorTests(unittest.TestCase):
             scheduler_config=NS(async_scheduling=False),
             max_concurrent_batches=1,
         )
+
+    def config_uni(self):
+        config = self.config()
+        config.parallel_config.world_size = 1
+        return config
 
     def test_engine_core_positional_rpc_reaches_budget_controller(self):
         config = self.config()
@@ -92,6 +103,28 @@ class ExecutorTests(unittest.TestCase):
         config.scheduler_config.async_scheduling = True
         with self.assertRaises(ValueError):
             namespace["NativeCapacityExecutor"](config)
+
+
+    def test_in_process_executor_forwards_single_value_and_rejects_rank_replies(self):
+        config = self.config_uni()
+        executor = namespace["NativeCapacityUniProcExecutor"](config)
+        self.assertTrue(executor.in_process)
+        # EngineCore passes single_value positionally; the override must not
+        # swallow it into **extra or the engine dies on its first step.
+        self.assertEqual(
+            executor.collective_rpc("execute_model", timeout=5, args=("o",),
+                                    single_value=True),
+            ["native"])
+        _, kwargs = executor.calls[-1]
+        self.assertTrue(kwargs["single_value"])
+        with self.assertRaises(ValueError):
+            executor.collective_rpc("execute_model", unique_reply_rank=0)
+
+    def test_in_process_executor_requires_single_rank(self):
+        config = self.config_uni()
+        config.parallel_config.world_size = 2
+        with self.assertRaises(ValueError):
+            namespace["NativeCapacityUniProcExecutor"](config)
 
 
 if __name__ == "__main__":

@@ -115,6 +115,45 @@ class ResidencyContractTests(unittest.TestCase):
             expected = {group*8//16*16 for group in range(count)}
             self.assertEqual(owners.required_pages()["x"], expected)
 
+    def test_incremental_page_ledger_matches_full_recompute(self):
+        """Differential test: incremental bookkeeping must equal a full pass."""
+        import random
+
+        layout = self.layout()
+        owners = Owners(layout)
+        rng = random.Random(20261120)
+        ready = {}
+
+        def reference():
+            blocks = set().union(*owners._owners.values()) if owners._owners else set()
+            for blockset, _ in owners._executions.values():
+                blocks.update(blockset)
+            return layout.pages_for(blocks)
+
+        pool = [(group, block) for group in (0, 1) for block in range(10)]
+        for step in range(600):
+            action = rng.random()
+            if action < 0.45:
+                name = f"req:{rng.randrange(6)}"
+                owners.replace({name: rng.sample(pool, rng.randrange(0, 6))})
+            elif action < 0.6:
+                known = sorted(owners._owners)
+                if known:
+                    owners.replace({}, [rng.choice(known)])
+            elif action < 0.9:
+                identity = f"graph:{rng.randrange(4)}"
+                if identity not in owners._executions:
+                    flag = [False]
+                    ready[identity] = flag
+                    owners.begin_execution(
+                        identity, rng.sample(pool, rng.randrange(1, 4)),
+                        lambda r=flag: r[0])
+            else:
+                for flag in ready.values():
+                    flag[0] = rng.random() < 0.5
+                owners.collect_completed()
+            self.assertEqual(owners.required_pages(), reference(), msg=f"step {step}")
+
 
 if __name__ == "__main__":
     unittest.main()

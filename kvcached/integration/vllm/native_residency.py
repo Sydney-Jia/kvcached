@@ -37,6 +37,38 @@ def dummy_state_owners(block_counts, num_requests):
                  for block in range(num_requests + 1))
 
 
+def ownership_signature(coordinator, output):
+    """Cheap digest of every input that affects snapshot_ownership().
+
+    The scheduler calls this before doing the full owner-set build. When the
+    digest is unchanged, the previous immutable owner tuples can be reused
+    with a new epoch; no block or owner changed between two decode steps.
+    """
+    managers = tuple(coordinator.single_type_managers)
+    pool = coordinator.block_pool
+    aliases = pool.cached_block_hashes_by_block
+    requests = []
+    for manager in managers:
+        for request, blocks in manager.req_to_blocks.items():
+            identity = getattr(request, "request_id", None)
+            if identity is None:
+                identity = id(request)
+            requests.append((str(identity),
+                             tuple(block.block_id for block in blocks)))
+    requests.sort()
+    blocks = tuple(
+        (index, block.ref_cnt, bool(block.is_null), block.block_hash,
+         tuple(sorted(aliases.get(index, ()))))
+        for index, block in enumerate(pool.blocks)
+    )
+    watchers = tuple(sorted(pool._reuse_watchers))
+    zero = tuple(output.new_block_ids_to_zero or ())
+    copies = tuple((copy.src_block_id, copy.dst_block_id)
+                   for copy in (output.kv_cache_block_copies or ()))
+    return (len(managers), len(pool.blocks), tuple(requests), blocks,
+            watchers, zero, copies)
+
+
 def snapshot_ownership(coordinator, output, *, epoch: int,
                        decode_group: Callable) -> NativeOwnership:
     managers = tuple(coordinator.single_type_managers)
