@@ -59,7 +59,7 @@ class WorkerTests(unittest.TestCase):
         worker.native_arena = NS(
             residency=pages, ensure=pages.ensure, retire_async=False,
             transition=lambda required, **_: pages.transition(required),
-            grow=lambda required: pages.ensure(required),
+            grow=lambda required, **_: pages.ensure(required),
             defer_retire=lambda required: None,
         )
         worker.native_owners = residency.ResidencyOwners(layout)

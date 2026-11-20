@@ -46,7 +46,11 @@ class NativeElasticWorker(NPUWorker):
         self.native_owners = None
         self.native_epoch = 0
         self.native_capacity_enabled = os.getenv('KVCACHED_NATIVE_CAPACITY') == '1'
-        self.native_elastic = self.native_capacity_enabled
+        # Sparse physical mapping is a residency property, not an admission
+        # property: an elastic deployment without the capacity protocol must
+        # still be able to reserve the pool and map pages on demand.
+        self.native_lazy_storage = os.getenv('KVCACHED_NATIVE_LAZY_STORAGE') == '1'
+        self.native_elastic = self.native_capacity_enabled or self.native_lazy_storage
         limit = os.getenv('KVCACHED_NATIVE_LIMIT_BYTES')
         prefix = os.getenv('KVCACHED_NATIVE_PREFIX_BLOCKS')
         self.native_budget = NativeBudgetState(NativeBudget(
@@ -130,7 +134,7 @@ class NativeElasticWorker(NPUWorker):
         print('KVCACHED_NATIVE_ALLOCATOR_HANDOFF ' + json.dumps(
             dict(rank=self.rank, before=before, after=after)), flush=True)
         arena = NativeStorageArena(self.device, vmm_ops, self._residency_fence,
-                                   lazy=self.native_capacity_enabled)
+                                   lazy=self.native_elastic)
         allocate = attn_utils._allocate_kv_cache
         reshape = attn_utils._reshape_kv_cache_v2
         allocations = 0
@@ -278,9 +282,13 @@ class NativeElasticWorker(NPUWorker):
                 # unmaps the candidates the next admission maps again. Under
                 # shared-budget pressure, though, the peer engine needs those
                 # pages back, so release them exactly as the base protocol did.
-                if (not self.native_capacity_enabled
-                        or self._budget_pressure()):
+                if self._budget_pressure():
                     self._transition_native(required, snapshot)
+                else:
+                    # Quiet step: map only, and leave retirement to the idle
+                    # reclaimer. publish=False keeps admission's candidate set
+                    # as the retirement target so nothing is unmapped twice.
+                    self.native_arena.grow(required, publish=False)
                 self._trace_residency('reclaim-complete')
             else:
                 self.native_arena.ensure(required)
