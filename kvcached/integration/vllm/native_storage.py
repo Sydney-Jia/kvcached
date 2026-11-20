@@ -53,7 +53,10 @@ class NativeStorageArena:
         # Background retirement: growth maps only what the engine requires;
         # pages that lost their owner are fenced and unmapped by this thread,
         # so the engine loop never waits on a device-wide completion.
-        self.retire_async = os.getenv('KVCACHED_NATIVE_RETIRE_ASYNC', '1') == '1'
+        # Off by default: an asynchronous unmap can race an in-flight kernel
+        # and fault the device (507011). Retirement belongs to the synchronous
+        # pressure transition; the idle reclaimer stays an opt-in experiment.
+        self.retire_async = os.getenv('KVCACHED_NATIVE_RETIRE_ASYNC', '0') == '1'
         try:
             self.retire_interval_s = max(0.05, float(os.getenv(
                 'KVCACHED_NATIVE_RETIRE_INTERVAL_S', '0.5')))
