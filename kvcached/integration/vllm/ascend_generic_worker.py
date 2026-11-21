@@ -414,6 +414,7 @@ class NativeElasticWorker(NPUWorker):
             # step requires, retirement happens at the scheduler's idle points.
             wait_s = float(os.getenv('KVCACHED_NATIVE_ENSURE_WAIT_S', '60'))
             deadline = time.monotonic() + max(0.0, wait_s)
+            reclaimed = False
             while True:
                 try:
                     return self.native_arena.ensure(required)
@@ -421,7 +422,18 @@ class NativeElasticWorker(NPUWorker):
                     if (not is_capacity_rejection(error)
                             or time.monotonic() >= deadline):
                         raise
-                    time.sleep(0.5)
+                    if not reclaimed:
+                        # The scheduler evicts cold prefixes under pressure;
+                        # their pages are still mapped. One synchronous
+                        # transition turns that eviction into real capacity,
+                        # which is much cheaper than waiting for a peer.
+                        reclaimed = True
+                        try:
+                            self.native_arena.transition(required)
+                        except Exception:
+                            pass
+                        continue
+                    time.sleep(0.2)
         try:
             if self._budget_pressure():
                 return self._transition_native(required, snapshot)

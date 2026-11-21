@@ -48,14 +48,19 @@ class NativeResidencyScheduler(Scheduler):
             # Predicted map-only work for the next step runs on the admission's
             # prefetch thread while this step executes; it never blocks here.
             admission.pipeline_prepare()
-        if (admission is None and native_gate.installed()
-                and not output.total_num_scheduled_tokens
-                and native_gate.pressure()):
-            # Gated elastic mode maps only what a step requires, so retirement
-            # waits for an empty scheduling point where its fence costs nothing.
-            # Cold prefixes go first: their pages are owners until evicted.
-            self._release_cold_prefix()
-            native_gate.reclaim_idle()
+        if admission is None and native_gate.installed():
+            if (not output.total_num_scheduled_tokens
+                    and native_gate.pressure()):
+                # Gated elastic mode maps only what a step requires, so
+                # retirement waits for an empty scheduling point where its
+                # fence costs nothing. Cold prefixes go first: their pages are
+                # owners until evicted.
+                self._release_cold_prefix()
+                native_gate.reclaim_idle()
+            elif native_gate.pressure(0.9):
+                # Near the wall with no idle point: evicting cold prefixes is
+                # fence-free, and the worker's rejection path reclaims them.
+                self._release_cold_prefix()
         self._kvcached_epoch += 1
         # The pinned multiprocess executor pickles SchedulerOutput, including
         # this side channel. Workers reject a missing/stale side channel rather
