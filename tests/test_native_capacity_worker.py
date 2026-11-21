@@ -33,6 +33,7 @@ namespace = dict(
     NativeBudgetState=capacity.NativeBudgetState,
     is_capacity_rejection=relief.is_capacity_rejection,
     os=os,
+    native_gate=NS(installed=lambda: False),
 )
 source = ROOT / "kvcached/integration/vllm/ascend_generic_worker.py"
 tree = ast.parse(source.read_text(encoding="utf-8"))

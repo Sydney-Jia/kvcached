@@ -17,6 +17,7 @@ from functools import wraps
 import torch
 from vllm_ascend.worker.worker import NPUWorker
 
+from kvcached.integration.vllm import native_gate
 from kvcached.integration.vllm.native_storage import NativeByteAllocation, NativeMetadataViews, NativeStorageArena
 from kvcached.integration.vllm.native_residency import dummy_state_owners
 from kvcached.residency import ResidencyOwners
@@ -167,6 +168,11 @@ class NativeElasticWorker(NPUWorker):
         # Worker initialization is serialized. Limit hook lifetime to the one
         # persistent phase; profiling/capture's temporary caches remain native.
         self.native_arena = arena
+        if (not self.native_capacity_enabled
+                and os.getenv('KVCACHED_NATIVE_GATE', '0') == '1'):
+            # Elastic gate: the scheduler owns idle-point retirement and the
+            # admission preflight, the worker only maps what a step requires.
+            native_gate.install(arena, self.native_owners)
         prepare_dummy = self.model_runner.prepare_dummy_attn
 
         @wraps(prepare_dummy)
@@ -403,6 +409,19 @@ class NativeElasticWorker(NPUWorker):
         a peer holding the ledger would kill the engine. Reclaim our own
         unowned pages and wait briefly for the peer's release instead.
         """
+        if native_gate.installed():
+            # Gated elastic mode never fences here: growth maps the pages this
+            # step requires, retirement happens at the scheduler's idle points.
+            wait_s = float(os.getenv('KVCACHED_NATIVE_ENSURE_WAIT_S', '60'))
+            deadline = time.monotonic() + max(0.0, wait_s)
+            while True:
+                try:
+                    return self.native_arena.ensure(required)
+                except (MemoryError, RuntimeError) as error:
+                    if (not is_capacity_rejection(error)
+                            or time.monotonic() >= deadline):
+                        raise
+                    time.sleep(0.5)
         try:
             if self._budget_pressure():
                 return self._transition_native(required, snapshot)
