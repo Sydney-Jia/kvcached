@@ -17,6 +17,25 @@ class NativeResidencyScheduler(Scheduler):
         super().__init__(*args, **kwargs)
         self._kvcached_epoch = 0
         self._native_admission = None
+        # Gate retirement runs in the worker processes. When those are the same
+        # process (in-process TP1 executor) the scheduler calls the arena
+        # directly; otherwise it asks every rank once per idle/pressure point.
+        self._gate_rpc = None
+        self._gate_pressure = False
+        if (os.getenv('KVCACHED_NATIVE_GATE') == '1'
+                and os.getenv('KVCACHED_NATIVE_CAPACITY') != '1'):
+            from kvcached.integration.vllm.native_executor import executor_for
+            try:
+                executor = executor_for(self.vllm_config)
+            except ValueError:
+                executor = None
+            if executor is not None and not getattr(executor, 'in_process', False):
+                self._gate_rpc = executor.collective_rpc
+            elif executor is None and self.vllm_config.parallel_config.world_size > 1:
+                # Without a native executor the scheduler cannot reach the
+                # worker arenas, and the gate would silently stop retiring.
+                raise ValueError(
+                    "KVCACHED_NATIVE_GATE with TP>1 requires the native capacity executor")
         if os.getenv('KVCACHED_NATIVE_CAPACITY') == '1':
             from kvcached.native_capacity import NativeBudget
             from kvcached.integration.vllm.native_admission import NativeAdmission
@@ -48,19 +67,27 @@ class NativeResidencyScheduler(Scheduler):
             # Predicted map-only work for the next step runs on the admission's
             # prefetch thread while this step executes; it never blocks here.
             admission.pipeline_prepare()
-        if admission is None and native_gate.installed():
-            if (not output.total_num_scheduled_tokens
-                    and native_gate.pressure()):
-                # Gated elastic mode maps only what a step requires, so
-                # retirement waits for an empty scheduling point where its
-                # fence costs nothing. Cold prefixes go first: their pages are
-                # owners until evicted.
-                self._release_cold_prefix()
-                native_gate.reclaim_idle()
-            elif native_gate.pressure(0.9):
-                # Near the wall with no idle point: evicting cold prefixes is
-                # fence-free, and the worker's rejection path reclaims them.
-                self._release_cold_prefix()
+        if admission is None:
+            idle = not output.total_num_scheduled_tokens
+            if self._gate_rpc is not None:
+                # Multi-process ranks: one collective call per idle point, and
+                # a slow heartbeat while any rank reports pressure.
+                if idle or (self._gate_pressure
+                            and self._kvcached_epoch % 16 == 0):
+                    self._release_cold_prefix()
+                    self._gate_idle()
+            elif native_gate.installed():
+                if idle and native_gate.pressure():
+                    # Gated elastic mode maps only what a step requires, so
+                    # retirement waits for an empty scheduling point where its
+                    # fence costs nothing. Cold prefixes go first: their pages
+                    # are owners until evicted.
+                    self._release_cold_prefix()
+                    native_gate.reclaim_idle()
+                elif native_gate.pressure(0.9):
+                    # Near the wall with no idle point: evicting cold prefixes
+                    # is fence-free, and the worker's rejection path reclaims.
+                    self._release_cold_prefix()
         self._kvcached_epoch += 1
         # The pinned multiprocess executor pickles SchedulerOutput, including
         # this side channel. Workers reject a missing/stale side channel rather
@@ -74,6 +101,18 @@ class NativeResidencyScheduler(Scheduler):
             # Avoid a hot RPC loop while a peer occupies the remaining memory.
             time.sleep(0.01)
         return output
+
+    def _gate_idle(self):
+        """Ask every rank to retire unowned pages if its ledger is tight."""
+        try:
+            rows = self._gate_rpc('kvcached_native_gate',
+                                  kwargs={'action': 'idle'})
+        except Exception as error:
+            print('KVCACHED_NATIVE_GATE_FAILED ' + repr(error)[:160], flush=True)
+            return 0
+        rows = [row for row in (rows or []) if isinstance(row, dict)]
+        self._gate_pressure = any(row.get('pressure') for row in rows)
+        return sum(int(row.get('reclaimed') or 0) for row in rows)
 
     def _release_cold_prefix(self):
         """Evict the oldest idle prefix blocks while the ledger is tight.

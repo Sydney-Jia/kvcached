@@ -478,6 +478,35 @@ class NativeElasticWorker(NPUWorker):
             return True
         return charged >= budget * threshold
 
+    def kvcached_native_gate(self, action='idle'):
+        """Rank-local gate hook for a multi-process scheduler.
+
+        The scheduler cannot see this process's arena, so it asks each rank to
+        retire its own unowned pages at an idle or pressure point. Returns the
+        local ledger state and the bytes retired here.
+        """
+        response = dict(rank=self.rank, action=action, ok=False,
+                        pressure=False, reclaimed=0)
+        arena = self.native_arena
+        if arena is None:
+            response['skipped'] = 'no-arena'
+            return response
+        if not native_gate.installed():
+            response['skipped'] = 'gate-off'
+            return response
+        try:
+            response['pressure'] = bool(native_gate.pressure())
+            if action == 'idle':
+                if response['pressure']:
+                    response['reclaimed'] = int(native_gate.reclaim_idle())
+            elif action != 'status':
+                response['skipped'] = 'unknown-action'
+                return response
+            response['ok'] = True
+        except Exception as error:
+            response['error'] = repr(error)[:160]
+        return response
+
     def _native_status(self):
         arena = self.native_arena
         layout = self.native_owners.layout
