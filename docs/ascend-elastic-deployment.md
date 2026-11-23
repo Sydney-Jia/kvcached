@@ -187,32 +187,50 @@ Expected steady state: LLM pool ≈ 12.27 GiB, VLM pool ≈ 2.23–2.36 GiB.
 
 Tensor parallel 1, both engines on one card:
 
-| Run | Total wall | Median | Max | ok / failed | Relief | Server down |
+| Run | Total wall | Median | Max | ok / failed | Relief | Idle reclaim |
 |---|---|---|---|---|---|---|
-| Capacity baseline (both engines) | 4987.7 s | 522.6 s | — | 497 / 5 | 485 | no |
-| Elastic, no gate | 4904.7 s | 272 s | 3096 s | 491 / 11 | 1 | no |
-| **Gate, both engines elastic** | **2887.2 s** | **293 s** | 968 s | **497 / 5** | 0 | no |
-| Reference: the previous personal branch | 2835.1 s | 287 s | 949 s | 497 / 5 | 8 | no |
+| Capacity baseline (both engines) | 4987.7 s | 522.6 s | — | 497 / 5 | 485 | none |
+| Elastic, no gate | 4904.7 s | 272 s | 3096 s | 491 / 11 | 1 | none |
+| Gate before the registration fix | 2887.2 s | 293 s | 968 s | 497 / 5 | 0 | dead (0 B) |
+| **Gate, registration fixed** | **2926.3 s** | **296.8 s** | 999.6 s | **497 / 5** | 23 | **5 events, 52.5 GB** |
+| Reference: the previous personal branch | 2835.1 s | 287 s | 949 s | 497 / 5 | 8 | — |
 
 The five failures are `task_159`'s known VLM HTTP 400s in every run.
 
-**These numbers predate the gate registration fix.** In that code the gate was
-registered before reshape published the owner table, so idle retirement always
-returned 0 while the scheduler had to treat the ledger as pressured and evicted
-cold prefixes every empty step. The throughput came from map-only execution
-alone. Re-measure before quoting these totals.
+Before the registration fix the gate was installed before reshape published the
+owner table, so idle retirement always returned 0: the scheduler could only see
+the ledger staying tight and evicted cold prefixes at every empty step without
+ever releasing a page. The fixed run does retire (five idle points returned
+about 52.5 GB to the device) and costs about 0.5 % of wall in map/unmap
+(`transition` 15.5 s, `map` 18.4 s accumulated on the LLM); the total lands
+within 1.4 % of the pre-fix run and within 3.2 % of the reference, which is the
+same order as run-to-run variance on this host. The relief count rises from 0 to
+23 (4 LLM, 19 VLM) because a reclaimed ledger now genuinely frees memory that
+the peer has to discover through its next budget sample.
 
 Tensor parallel 2, each engine on its own card pair (LLM cards 4,5 / VLM
 cards 6,7), 6 traces:
 
 | Run | Total wall | Median | Max | ok / failed | Server down |
 |---|---|---|---|---|---|
-| TP1, same configuration | 883–891 s | ~220 s | ~882 s | 67 / 0 | no |
-| **TP2** | **899.5 s** | 216 s | 881 s | **67 / 0** | no |
+| TP1, same configuration | 883–891 s | ~220 s | 882 s | 67 / 0 | no |
+| TP2 before the fix | 899.5 s | 216 s | 881 s | 67 / 0 | no |
+| **TP2, registration fixed** | **884.9 s** | 216.2 s | 880.9 s | **67 / 0** | no |
 
 Per-rank KV pool at TP2 is 29.94 GiB versus 12.27 GiB at TP1. The 6-trace
 total is dominated by one fixed-length decode, so TP2 is within ~2% there;
 the larger pool is the part that should matter under sustained load.
+
+At the default `KVCACHED_NATIVE_IDLE_RECLAIM_UTILIZATION=0.75` the TP2 run
+performed no idle retirement: with a 29.94 GiB per-rank pool and six traces no
+rank's ledger reached the threshold. A forced-pressure check (single engine on
+cards 6,7, threshold ≈ 0, three short requests) exercised the multi-rank RPC
+path with no gate failures but retired 0 bytes, because completed requests
+leave their blocks in the prefix cache and cached blocks remain owners until
+evicted. Retirement therefore still depends on cold-prefix eviction happening,
+which is the intended design. The check also hit the documented HCCL aicpu
+exception (`0x2a`) when retrying the pair 4,5 while `npu-smi` showed foreign
+processes holding those devices; 6,7 formed a communicator normally.
 
 Host load matters: the reference runs were taken at load average ≈ 34 on the
 192-core host, other runs at 100–200. Treat cross-run wall times as indicative
