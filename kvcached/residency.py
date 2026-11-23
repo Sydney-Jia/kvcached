@@ -12,6 +12,7 @@ the kernels that previously consumed its state.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from collections import OrderedDict
 from itertools import product
@@ -126,6 +127,9 @@ class Layout:
                  *, cache_page_entries: int = 65536):
         _integer(cache_page_entries, 'cache_page_entries')
         self.cache_page_entries = cache_page_entries
+        # A speculative prefetch expands candidate blocks from another thread
+        # while the engine thread keeps using the same immutable geometry.
+        self._cache_lock = threading.Lock()
         self._block_pages = OrderedDict()
         self._cached_offsets = 0
         self._cache_hits = 0
@@ -168,10 +172,12 @@ class Layout:
 
     def _pages_for_block(self, group, block):
         identity = (group, block)
-        if identity in self._block_pages:
-            self._cache_hits += 1
-            self._block_pages.move_to_end(identity)
-            return self._block_pages[identity]
+        with self._cache_lock:
+            cached = self._block_pages.get(identity)
+            if cached is not None:
+                self._cache_hits += 1
+                self._block_pages.move_to_end(identity)
+                return cached
         self._cache_misses += 1
         pages = {}
         for span in self.groups[group]:
@@ -186,11 +192,13 @@ class Layout:
         # byte offsets, never owners, physical mappings or prefix validity.
         # Bound by offset count as well as the finite group/block domain.
         if size <= self.cache_page_entries:
-            while self._block_pages and self._cached_offsets + size > self.cache_page_entries:
-                _, removed = self._block_pages.popitem(last=False)
-                self._cached_offsets -= sum(len(offsets) for _, offsets in removed)
-            self._block_pages[identity] = result
-            self._cached_offsets += size
+            with self._cache_lock:
+                while self._block_pages and self._cached_offsets + size > self.cache_page_entries:
+                    _, removed = self._block_pages.popitem(last=False)
+                    self._cached_offsets -= sum(len(offsets) for _, offsets in removed)
+                if identity not in self._block_pages:
+                    self._block_pages[identity] = result
+                    self._cached_offsets += size
         return result
 
     def cache_status(self):

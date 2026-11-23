@@ -69,6 +69,39 @@ class PhysicalTest(unittest.TestCase):
             self.pool.register(NS(key=str(index), reservation_bytes=48,
                                   size_bytes=41, page_bytes=16), index)
 
+    def test_prefetch_maps_without_initializing_until_consumed(self):
+        self.pool.prefetch({'0': {0, 16}, '1': {32}})
+        # Speculative pages are mapped but deliberately not zeroed.
+        self.assertEqual(self.memory.data, {0: {0: 'uninitialized', 16: 'uninitialized'},
+                                            1: {32: 'uninitialized'}})
+        self.assertEqual(self.pool.status()['mapped_bytes'], 48)
+        # A consumer zeroes exactly the pages it requires, once.
+        self.pool.ensure({'0': {0}, '1': {32}})
+        self.assertEqual(self.memory.data[0], {0: 0, 16: 'uninitialized'})
+        self.assertEqual(self.memory.data[1], {32: 0})
+        self.pool.ensure({'0': {0}, '1': {32}})
+        self.assertEqual(self.memory.data[0][0], 0)
+
+    def test_prefetched_pages_retire_with_their_uninitialized_mark(self):
+        self.pool.prefetch({'0': {0, 16}, '1': set()})
+        self.assertEqual(self.pool.reclaim({'0': {0}, '1': set()}), 16)
+        self.assertEqual(self.pool.uninitialized['0'], {0})
+        self.assertEqual(self.pool.mapped['0'], {0})
+        self.assertNotIn(16, self.memory.data[0])
+
+    def test_reclaim_eligible_retires_only_the_requested_pages(self):
+        self.pool.ensure(self.pool.full())
+        # The background reclaimer releases bounded chunks: only page 16 is
+        # offered here, so pages 0/32 stay mapped even though they are unowned.
+        self.assertEqual(self.pool.reclaim({'0': {0}, '1': set()},
+                                           eligible={'0': {16}, '1': set()}), 16)
+        self.assertEqual(self.pool.mapped['0'], {0, 32})
+        self.assertNotIn(16, self.memory.data[0])
+        # A later chunk can release the remaining unowned page.
+        self.assertEqual(self.pool.reclaim({'0': {0}, '1': set()},
+                                           eligible={'0': {32}, '1': set()}), 16)
+        self.assertEqual(self.pool.mapped['0'], {0})
+
     def test_reclaim_and_regrow_do_not_overwrite_live_shared_page(self):
         self.pool.ensure(self.pool.full())
         self.memory.data[0][16] = 'live state'
