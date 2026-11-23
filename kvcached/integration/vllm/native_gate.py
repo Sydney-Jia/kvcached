@@ -9,6 +9,7 @@ the worker in one process, and the scheduler is the only place that can evict
 the prefix blocks whose pages retirement is allowed to release.
 """
 
+import json
 import os
 
 _arena = None
@@ -17,6 +18,11 @@ _owners = None
 
 def install(arena, owners):
     global _arena, _owners
+    if owners is None:
+        # A worker registers before reshape publishes the owner table would
+        # keep a permanent None here, and every idle reclaim would return 0
+        # while the RPC still reported success. Fail loudly instead.
+        raise ValueError('Native gate requires a validated owner table')
     _arena = arena
     _owners = owners
     return _arena
@@ -29,7 +35,7 @@ def clear():
 
 
 def installed():
-    return _arena is not None
+    return _arena is not None and _owners is not None
 
 
 def pressure(threshold=None):
@@ -62,8 +68,15 @@ def reclaim_idle():
     if _arena is None or _owners is None:
         return 0
     try:
-        return _arena.transition(_owners.required_pages())['reclaimed_bytes']
+        reclaimed = int(
+            _arena.transition(_owners.required_pages())['reclaimed_bytes'])
     except Exception as error:
         print('KVCACHED_NATIVE_IDLE_RECLAIM_FAILED ' + repr(error)[:200],
               flush=True)
         return 0
+    if reclaimed:
+        # Without this line a dead retirement path is indistinguishable from a
+        # ledger that simply had nothing to retire.
+        print('KVCACHED_NATIVE_GATE_RECLAIM ' + json.dumps(
+            dict(reclaimed=reclaimed)), flush=True)
+    return reclaimed

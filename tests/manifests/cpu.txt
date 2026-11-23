@@ -27,6 +27,14 @@ tests/test_kvcache_manager_retired_pages.py
 tests/test_lifecycle_readiness.py
 tests/test_make_cache_key.py
 tests/test_memory_limit_control.py
+tests/test_native_admission.py
+tests/test_native_admission_runtime.py
+tests/test_native_budget_control.py
+tests/test_native_capacity.py
+tests/test_native_capacity_executor.py
+tests/test_native_capacity_worker.py
+tests/test_native_gate.py
+tests/test_native_lazy_storage.py
 tests/test_native_residency_snapshot.py
 tests/test_observability.py
 tests/test_offload_copy_pins.py

@@ -106,6 +106,16 @@ class LazyStorageTests(unittest.TestCase):
         self.assertIs(arena.raw["0"], raw)
         self.assertEqual(memory.data[0], {16: "retained state", 32: 0})
 
+    def test_transition_initializes_a_prefetched_page_it_keeps(self):
+        arena, memory = self.arena(True)
+        arena.allocate(41)
+        arena.prefetch({"0": {0}})
+        # Prefetch maps without initializing; the mapping is already complete.
+        self.assertEqual(memory.data[0], {0: "uninitialized"})
+        arena.transition({"0": {0}})
+        # An unchanged target must still consume the uninitialized ledger.
+        self.assertEqual(memory.data[0], {0: 0})
+
     def test_default_held_initialization_is_preserved(self):
         arena, memory = self.arena(False)
         arena.allocate(41)

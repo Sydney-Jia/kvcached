@@ -6,6 +6,7 @@ device stream, graph, or model behavior; those require the hardware matrix.
 """
 
 import ast
+import json
 import os
 from pathlib import Path
 import sys
@@ -26,6 +27,33 @@ class BaseWorker:
         self.executions += 1
         return "executed"
 
+    def compile_or_warm_up_model(self):
+        return "warm"
+
+
+class FakeNpu:
+    """Only the allocator handoff calls reach the device in these tests."""
+
+    @staticmethod
+    def synchronize():
+        return None
+
+    @staticmethod
+    def empty_cache():
+        return None
+
+    @staticmethod
+    def mem_get_info():
+        return 123, 456
+
+    @staticmethod
+    def memory_allocated():
+        return 0
+
+    @staticmethod
+    def memory_reserved():
+        return 0
+
 
 namespace = dict(
     NPUWorker=BaseWorker,
@@ -33,6 +61,8 @@ namespace = dict(
     NativeBudgetState=capacity.NativeBudgetState,
     is_capacity_rejection=relief.is_capacity_rejection,
     os=os,
+    json=json,
+    torch=NS(npu=FakeNpu),
     native_gate=NS(installed=lambda: False),
 )
 source = ROOT / "kvcached/integration/vllm/ascend_generic_worker.py"
@@ -204,6 +234,24 @@ class WorkerTests(unittest.TestCase):
         self.execute(self.snapshot(((0, 2),)))
         self.assertEqual(self.memory.data[0], {0: 0, 32: 0})
         self.assertEqual(self.worker.executions, 1)
+
+    def test_fixed_pool_keeps_its_mapping_through_warmup(self):
+        self.worker.native_capacity_enabled = False
+        self.worker.native_elastic = False
+        self.worker.native_arena.residency.ensure({"0": {16, 32}})
+        self.worker.compile_or_warm_up_model()
+        # A dense pool is fully mapped by construction; retiring the warmup
+        # set there would drop backing the fixed mode never remaps lazily.
+        self.assertEqual(
+            self.worker.native_arena.residency.status()["mapped_bytes"], 48)
+
+    def test_elastic_warmup_retires_the_dummy_mapping(self):
+        self.worker.native_capacity_enabled = False
+        self.worker.native_elastic = True
+        self.worker.native_arena.residency.ensure({"0": {16, 32}})
+        self.worker.compile_or_warm_up_model()
+        self.assertEqual(
+            self.worker.native_arena.residency.status()["mapped_bytes"], 0)
 
 
 if __name__ == "__main__":

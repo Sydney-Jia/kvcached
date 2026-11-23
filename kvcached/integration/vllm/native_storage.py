@@ -368,7 +368,14 @@ class NativeStorageArena:
         # Serialized residency owns the mapping ledger. An unchanged target
         # needs neither a VMM operation nor another pair of full page walks.
         # Validate first so poisoned state and invalid offsets still fail.
-        if all(target[key] == self.residency.mapped[key] for key in target):
+        # Prefetch maps without initializing, so pages it speculatively backed
+        # still need ensure() when they become required even if the mapping
+        # is already in place. Spare and other kept pages stay untouched.
+        pending = any(self.residency.uninitialized[key] & desired[key]
+                      for key in desired)
+        if (not pending
+                and all(target[key] == self.residency.mapped[key]
+                        for key in target)):
             return dict(reclaimed_bytes=0, grown_bytes=0)
         # Only real spare-cache pages take the drop-spares retry path; pages
         # kept from retirement for a speculative prefetch are not spares and

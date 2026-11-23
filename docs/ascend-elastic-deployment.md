@@ -41,11 +41,20 @@ The gate keeps the elastic mapping and moves retirement off the decode path:
 
 - a decode step only maps the pages it requires (`arena.ensure(required)`);
 - unowned pages are retired at an **empty scheduling point**, where the fence
-  is free, after evicting the oldest cold prefix blocks (their pages are owners
-  until then);
+  is free;
+- cold prefix blocks are evicted only **after** a rank reports pressure, never
+  on the assumption of it, because their pages stay owned until evicted and
+  each eviction costs a recompute later;
 - near the budget wall the scheduler also evicts cold prefixes without an idle
   point, and the worker's first capacity rejection runs one synchronous
-  transition so those pages are really released before it retries.
+  transition so those pages are really released before it retries;
+- with tensor parallel > 1 the scheduler samples per-rank pressure on a slow
+  heartbeat while busy (`KVCACHED_NATIVE_GATE_PROBE_EPOCHS`) instead of
+  fencing, and retires only at empty steps.
+
+The gate must be registered **after** reshape publishes the owner table;
+registering before it captured `None` and made every idle retirement a silent
+no-op that still reported success.
 
 Both engines use the same gate. Running the VLM under capacity admission was
 measured and rejected: its video requests were rejected repeatedly against a
@@ -71,6 +80,7 @@ Shared by both services (`_env.sh`):
 | `KVCACHED_NATIVE_ENSURE_WAIT_S` | `60` | Bound on waiting for a peer-held budget |
 | `KVCACHED_NATIVE_IDLE_RECLAIM_UTILIZATION` | `0.75` | Ledger fraction that starts idle retirement |
 | `KVCACHED_NATIVE_IDLE_PREFIX_EVICT` | `8` | Cold prefix blocks evicted per idle/pressure point |
+| `KVCACHED_NATIVE_GATE_PROBE_EPOCHS` | `16` | Busy-step period for the pressure-only probe (TP > 1) |
 
 LLM only (`_llm.sh`):
 
@@ -185,6 +195,12 @@ Tensor parallel 1, both engines on one card:
 | Reference: the previous personal branch | 2835.1 s | 287 s | 949 s | 497 / 5 | 8 | no |
 
 The five failures are `task_159`'s known VLM HTTP 400s in every run.
+
+**These numbers predate the gate registration fix.** In that code the gate was
+registered before reshape published the owner table, so idle retirement always
+returned 0 while the scheduler had to treat the ledger as pressured and evicted
+cold prefixes every empty step. The throughput came from map-only execution
+alone. Re-measure before quoting these totals.
 
 Tensor parallel 2, each engine on its own card pair (LLM cards 4,5 / VLM
 cards 6,7), 6 traces:

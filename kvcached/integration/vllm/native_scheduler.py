@@ -22,6 +22,14 @@ class NativeResidencyScheduler(Scheduler):
         # directly; otherwise it asks every rank once per idle/pressure point.
         self._gate_rpc = None
         self._gate_pressure = False
+        try:
+            # Busy-mode probe period in scheduling epochs. It must not depend
+            # on the previous sample, or pressure that rises mid-decode is
+            # never re-examined until the next empty step.
+            self._gate_probe_epochs = max(1, int(os.getenv(
+                'KVCACHED_NATIVE_GATE_PROBE_EPOCHS', '16')))
+        except ValueError:
+            self._gate_probe_epochs = 16
         if (os.getenv('KVCACHED_NATIVE_GATE') == '1'
                 and os.getenv('KVCACHED_NATIVE_CAPACITY') != '1'):
             from kvcached.integration.vllm.native_executor import executor_for
@@ -70,20 +78,31 @@ class NativeResidencyScheduler(Scheduler):
         if admission is None:
             idle = not output.total_num_scheduled_tokens
             if self._gate_rpc is not None:
-                # Multi-process ranks: one collective call per idle point, and
-                # a slow heartbeat while any rank reports pressure.
-                if idle or (self._gate_pressure
-                            and self._kvcached_epoch % 16 == 0):
-                    self._release_cold_prefix()
+                # Multi-process ranks. An empty step retires unowned pages,
+                # which fences; a busy step only samples pressure, because a
+                # fence mid-decode is the cost the gate exists to avoid.
+                if idle:
                     self._gate_idle()
+                    if self._gate_pressure:
+                        # Evict only after a rank actually reports pressure;
+                        # retirement above may already have brought it down.
+                        self._release_cold_prefix()
+                elif self._kvcached_epoch % self._gate_probe_epochs == 0:
+                    self._gate_status()
+                    if self._gate_pressure:
+                        self._release_cold_prefix()
             elif native_gate.installed():
-                if idle and native_gate.pressure():
+                if idle:
                     # Gated elastic mode maps only what a step requires, so
                     # retirement waits for an empty scheduling point where its
-                    # fence costs nothing. Cold prefixes go first: their pages
-                    # are owners until evicted.
-                    self._release_cold_prefix()
-                    native_gate.reclaim_idle()
+                    # fence costs nothing. Never evict on the assumption of
+                    # pressure: retiring unowned pages may be enough, and each
+                    # cold prefix eviction costs a recompute later.
+                    if native_gate.pressure():
+                        native_gate.reclaim_idle()
+                    if native_gate.pressure():
+                        # Cold prefixes still own their pages at this point.
+                        self._release_cold_prefix()
                 elif native_gate.pressure(0.9):
                     # Near the wall with no idle point: evicting cold prefixes
                     # is fence-free, and the worker's rejection path reclaims.
@@ -102,15 +121,24 @@ class NativeResidencyScheduler(Scheduler):
             time.sleep(0.01)
         return output
 
-    def _gate_idle(self):
-        """Ask every rank to retire unowned pages if its ledger is tight."""
+    def _gate_rows(self, action):
+        """One collective gate call; an unreachable rank is reported, not fatal."""
         try:
             rows = self._gate_rpc('kvcached_native_gate',
-                                  kwargs={'action': 'idle'})
+                                  kwargs={'action': action})
         except Exception as error:
             print('KVCACHED_NATIVE_GATE_FAILED ' + repr(error)[:160], flush=True)
-            return 0
-        rows = [row for row in (rows or []) if isinstance(row, dict)]
+            return []
+        return [row for row in (rows or []) if isinstance(row, dict)]
+
+    def _gate_status(self):
+        """Sample per-rank pressure only; never fences and never retires."""
+        self._gate_pressure = any(
+            row.get('pressure') for row in self._gate_rows('status'))
+
+    def _gate_idle(self):
+        """Ask every rank to retire unowned pages if its ledger is tight."""
+        rows = self._gate_rows('idle')
         self._gate_pressure = any(row.get('pressure') for row in rows)
         return sum(int(row.get('reclaimed') or 0) for row in rows)
 

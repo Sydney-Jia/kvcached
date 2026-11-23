@@ -168,11 +168,6 @@ class NativeElasticWorker(NPUWorker):
         # Worker initialization is serialized. Limit hook lifetime to the one
         # persistent phase; profiling/capture's temporary caches remain native.
         self.native_arena = arena
-        if (not self.native_capacity_enabled
-                and os.getenv('KVCACHED_NATIVE_GATE', '0') == '1'):
-            # Elastic gate: the scheduler owns idle-point retirement and the
-            # admission preflight, the worker only maps what a step requires.
-            native_gate.install(arena, self.native_owners)
         prepare_dummy = self.model_runner.prepare_dummy_attn
 
         @wraps(prepare_dummy)
@@ -203,6 +198,14 @@ class NativeElasticWorker(NPUWorker):
             attn_utils._reshape_kv_cache_v2 = reshape
         if allocations != 1 or not arena.raw or self.native_owners is None:
             raise RuntimeError("Native storage hook did not materialize a validated layout")
+        if (not self.native_capacity_enabled
+                and os.getenv('KVCACHED_NATIVE_GATE', '0') == '1'):
+            # Elastic gate: the scheduler owns idle-point retirement and the
+            # admission preflight, the worker only maps what a step requires.
+            # Register only after reshape published the owner table: an earlier
+            # registration captures None and turns idle retirement into a
+            # silent no-op that still reports success.
+            native_gate.install(arena, self.native_owners)
         self.model_runner.prepare_dummy_attn = prepare_owned_dummy
         torch.npu.synchronize()
         print('KVCACHED_GENERIC_LAYOUT ' + json.dumps(self._native_status()), flush=True)
@@ -214,9 +217,11 @@ class NativeElasticWorker(NPUWorker):
                 return result
             # Warmup and graph capture map a dummy batch. Capacity mode retires
             # those pages below; elastic mode must do the same or the resident
-            # dummy pages starve a second engine on the same card.
-            self.native_arena.transition(
-                {key: set() for key in self.native_arena.residency.storages})
+            # dummy pages starve a second engine on the same card. A fixed pool
+            # is fully mapped by construction and keeps its backing.
+            if self.native_elastic:
+                self.native_arena.transition(
+                    {key: set() for key in self.native_arena.residency.storages})
             # Profiling also leaves allocator-cached blocks. Return them before
             # the second engine measures its own pool; nothing is running yet.
             try:
